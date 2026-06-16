@@ -17,7 +17,7 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture documentation.
 
 **Personal knowledge base**
 - Stores papers as LLM-generated summaries (~1000 words) or as full chunked text for deep querying
-- Indexes your Obsidian vault notes alongside papers in a single local vector store (ChromaDB)
+- Indexes your Obsidian vault notes alongside papers in a single local vector store (runs entirely on your machine)
 - Privacy model: vault folders marked private are accessible to the local model only — never sent to cloud APIs
 
 **Conversational agent (`vault-chat`)**
