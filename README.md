@@ -1,93 +1,76 @@
-# paper_digest
+# seshat
 
-arXiv paper digest for a computational biologist interested in cytometry, single-cell genomics, and AI/ML research. Fetches papers weekly, scores them with an LLM, and writes a ranked Markdown digest. High-scoring papers are automatically indexed into a local RAG database for retrieval and chat.
+arXiv paper digest for a computational biologist. Fetches papers weekly, scores them with an LLM, and writes a ranked Markdown digest. High-scoring papers are indexed into a local knowledge base for conversational retrieval and management.
+
+See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture documentation.
+
+---
 
 ## Repository structure
 
 ```
-paper_digest/
 ├── digest/
-│   ├── config.py               # Central configuration (loads ~/.paper_digest/config.toml)
-│   ├── errors.py               # Domain exceptions and retry decorator
-│   ├── llm.py                  # LLM provider abstraction (Ollama and Anthropic adapters)
-│   ├── fetch.py                # Fetch papers from arXiv
-│   ├── score.py                # LLM-based filtering and scoring
-│   ├── format.py               # Markdown digest formatter
-│   ├── convert.py              # PDF-to-Markdown converter (standalone CLI)
-│   ├── run.py                  # Main pipeline entry point
-│   ├── rag.py                  # Local RAG database (ChromaDB + sentence-transformers)
-│   ├── kb.py                   # kb CLI
-│   └── prompts/
-│       ├── prompt_filter_score.md  # Prompt template for paper scoring
-│       └── paper_summary.md        # Prompt template for paper summarisation
+│   ├── config.py, errors.py, llm.py   # Shared infrastructure
+│   ├── arxiv/                          # arXiv fetching and PDF conversion
+│   │   ├── fetch.py
+│   │   └── convert.py
+│   ├── pipeline/                       # Automated weekly digest
+│   │   ├── run.py, score.py, format.py
+│   │   └── prompts/prompt_filter_score.md
+│   └── kb/                             # Knowledge base management
+│       ├── store.py, cli.py
+│       └── prompts/paper_summary.md
 ├── vault_chat/
-│   └── chat.py                 # Multi-turn vault + RAG chat
-├── run_digest.sh               # Shell wrapper for launchd scheduling
+│   └── chat.py                         # KB agent (vault-chat)
+├── docs/
+│   ├── DESIGN.md
+│   └── CHANGELOG.md
+├── run_digest.sh                       # Shell wrapper for launchd
 └── pyproject.toml
 ```
 
+---
+
 ## Configuration
 
-All settings live in `~/.paper_digest/config.toml`. The file is optional — built-in defaults are used if it doesn't exist. Environment variables override TOML values.
+All settings live in `~/.seshat/config.toml`. Optional — defaults apply if absent. Environment variables override TOML values.
 
 ```toml
 [digest]
 ollama_model = "gemma4:26b"
-anthropic_model = "claude-sonnet-4-6"
 output_dir = "~/Documents/papers/digest"
 max_results = 10
-# arxiv_categories = [["cs.LG", 150], ["cs.AI", 80], ...]  # override fetch targets
 
 [rag]
-rag_dir = "~/.paper_digest/rag"
-embed_model = "all-MiniLM-L6-v2"
+rag_dir = "~/.seshat/rag"
 
 [chat]
-provider = "ollama"          # "ollama" | "anthropic"
-vault_path = "~/vault"
+provider = "ollama"              # "ollama" | "anthropic"
+vault_path = "~/Documents/obsidian"
+private_vault_dirs = ["private"] # vault folders accessible to local model only
 
 [auth]
-oauth_client_id = ""         # required for kb auth login
+oauth_client_id = ""             # required for kb auth login
 ```
 
-Environment variables (`OLLAMA_MODEL`, `ANTHROPIC_MODEL`, `CHAT_PROVIDER`, `VAULT_PATH`) override the corresponding TOML values when set.
+Env var overrides: `OLLAMA_MODEL`, `ANTHROPIC_MODEL`, `CHAT_PROVIDER`, `VAULT_PATH`.
 
-## Features
+To customise the agent's behaviour, create `~/.seshat/system_prompt.md`.
 
-### Digest pipeline
+---
 
-Fetches recent papers from arXiv (cs.LG, cs.AI, cs.NE, cs.CV, cs.CL, cs.MA), scores them with the configured LLM, and writes a tiered Markdown digest to `output_dir`. Papers are scored 1–10 and grouped into Must-Read (≥ 9), Worth Reading (7–8), and Skim/Bookmark (5–6).
+## Privacy model
 
-After each run, papers with score ≥ 9 are automatically added to the local RAG database. The scoring pipeline works with either Ollama or Anthropic — the same `provider` setting used for chat applies.
+Vault notes under `private_vault_dirs` are private — accessible by the local Ollama model only. Papers are always public. When using a cloud provider (Anthropic), queries that match private documents show a warning; private vault files cannot be read.
 
-### LLM providers
+```
+vault/
+├── private/    ← local model only
+│   └── journal/
+└── research/   ← cloud + local
+```
 
-Both the digest pipeline and vault chat use the same provider abstraction. Switching providers changes the model used for scoring, summarisation, and chat all at once.
-
-| Provider | Config | Env var override |
-|---|---|---|
-| Ollama (local, default) | `[chat] provider = "ollama"` | `CHAT_PROVIDER=ollama` |
-| Anthropic Claude | `[chat] provider = "anthropic"` | `CHAT_PROVIDER=anthropic` |
-
-### RAG database
-
-A persistent local vector database (ChromaDB at `~/.paper_digest/rag/`) with two collections:
-
-- **Papers** — one document per paper, stored as an LLM-generated dense summary (up to 1000 words). Papers from digest runs reuse the existing scoring summary; manually added papers get a fresh summary generated at add time.
-- **Vault notes** — Obsidian vault `.md` files, chunked and indexed for semantic search.
-
-Embeddings use `all-MiniLM-L6-v2` (runs locally, no API call needed).
-
-### Vault chat
-
-A multi-turn agentic CLI with four tools:
-
-| Tool | What it does |
-|---|---|
-| `read_file` | Read a specific vault file by relative path |
-| `search_vault` | Semantic search over vault notes to discover relevant files |
-| `retrieve_papers` | Semantic search over indexed papers |
-| `remove_paper` | Remove a paper — LLM identifies it from a description, confirms before acting |
+---
 
 ## Setup
 
@@ -96,20 +79,13 @@ uv sync
 uv pip install -e .
 ```
 
-Requires [Ollama](https://ollama.com) running locally with the configured model pulled (for Ollama provider).
+Requires [Ollama](https://ollama.com) running locally with the configured model pulled.
+
+---
 
 ## Usage
 
-All commands below must be prefixed with `uv run` — they are entry points installed into the project's virtual environment, not system-wide executables:
-
-```bash
-uv run run-digest
-uv run vault-chat --help
-uv run kb --help
-uv run convert-pdf --help
-```
-
-Alternatively, activate the venv once (`source .venv/bin/activate`) and then use the command names directly for the rest of the session.
+All commands require `uv run` prefix (entry points in `.venv/bin/`). Alternatively, activate the venv once with `source .venv/bin/activate`.
 
 ### Weekly digest
 
@@ -117,50 +93,85 @@ Alternatively, activate the venv once (`source .venv/bin/activate`) and then use
 uv run run-digest
 ```
 
-### Vault chat
+Fetches ~490 papers from arXiv, scores them, writes a tiered Markdown digest, and automatically indexes papers with score ≥ 9 into the knowledge base.
+
+### Vault chat — KB agent
+
+The primary interface for interacting with the knowledge base. Handles both querying and management through natural language.
 
 ```bash
-uv run vault-chat
-uv run vault-chat ~/path/to/vault          # override vault path for this session
-CHAT_PROVIDER=anthropic uv run vault-chat  # use Anthropic Claude for this session
+uv run vault-chat                           # uses provider from config
+uv run vault-chat ~/path/to/vault           # override vault path
+CHAT_PROVIDER=anthropic uv run vault-chat   # use Anthropic for this session
 ```
 
-The default provider comes from `[chat] provider` in `~/.paper_digest/config.toml`.
+The agent has the following tools:
 
-On startup, vault-chat refreshes the vault index (new/changed/deleted files). Index the vault first if you haven't already:
-
-```bash
-uv run kb index-vault
-```
+| Tool | What it does |
+|---|---|
+| `retrieve_papers` | Search indexed papers |
+| `search_notes` | Search vault notes |
+| `read_file` | Read one vault file in full |
+| `add_document` | Add a paper (arXiv URL) or local PDF — see storage modes below |
+| `remove_document` | Two-step remove: preview then confirm; optionally delete the local file |
+| `list_papers` | List indexed papers |
+| `kb_stats` | Paper, note, and chunk counts |
+| `index_vault` | Build or rebuild the vault index |
+| `refresh_vault` | Incremental vault sync |
 
 Example interactions:
+
 ```
-You: what papers do we have on mechanistic interpretability?
-You: remove the paper about SAE probing in biology
+You: index my vault
+You: add https://arxiv.org/abs/2406.04093, score 9, Track 1
+You: add ~/Downloads/paper.pdf as a private document, full text mode
+You: what papers do we have on sparse autoencoders?
+You: remove the paper about SAE probing
 You: what are my notes on transformers?
 ```
 
-### Paper RAG database
+#### Storage modes for `add_document`
+
+When adding a paper or PDF, the agent asks which mode to use if not specified:
+
+| Mode | What happens | Use when |
+|---|---|---|
+| `summary` (default) | LLM generates a dense ~1000-word summary; 1–2 chunks stored | Most papers — fast and compact |
+| `full_text` | PDF downloaded and converted to Markdown; full text chunked | Papers you want to query at paragraph level |
+
+### Knowledge base CLI (`kb`)
+
+For scripted use, batch operations, and initial setup.
 
 ```bash
-# Index / refresh vault
+# Vault indexing
 uv run kb index-vault
-uv run kb index-vault --vault-path ~/path/to/vault --force   # full re-index
+uv run kb index-vault --vault-path ~/path/to/vault --force   # clear and rebuild
 uv run kb refresh-vault
 
-# Add papers
+# Add a paper by arXiv URL
 uv run kb add https://arxiv.org/abs/2406.04093 --score 9 --track "Track 1"
-uv run kb add paper.pdf --provider anthropic
+uv run kb add https://arxiv.org/abs/2406.04093 --full-text   # index full PDF text
+
+# Add a local PDF
+uv run kb add paper.pdf --visibility private          # private, summary mode
+uv run kb add paper.pdf --visibility private --full-text  # private, full text
+
+# Provider for summary generation (defaults to config provider)
+uv run kb add https://arxiv.org/abs/2406.04093 --provider anthropic
+
+# Import all previous digest files at once (no LLM call needed)
+uv run kb add-digest ~/Documents/papers/digest/
+uv run kb add-digest ~/Documents/papers/digest/ --min-score 7
 
 # Inspect
 uv run kb list
 uv run kb stats
 
-# Remove by ID (use vault-chat for fuzzy removal by description)
-uv run kb remove 2406.04093
+# Remove (shows preview + confirmation; optionally deletes the local file)
+uv run kb remove https://arxiv.org/abs/2406.04093
+uv run kb remove file:///path/to/paper.pdf --delete-file
 ```
-
-`--provider` accepts `anthropic` or an Ollama model name. Defaults to the `[chat] provider` value from config — if that is already set to `anthropic`, you don't need to pass `--provider` explicitly. PDFs are sent directly to the model without a conversion step; the model must support document/vision input.
 
 ### Anthropic authentication
 
@@ -169,13 +180,13 @@ uv run kb remove 2406.04093
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**Option 2 — claude.ai OAuth** (browser flow, persists across sessions):
+**Option 2 — claude.ai OAuth** (one-time browser flow, persists across sessions):
 ```bash
-uv run kb auth login     # opens browser, saves token to ~/.paper_digest/auth.json
-uv run kb auth status    # show current auth method
+uv run kb auth login     # opens browser → saves token to ~/.seshat/auth.json
+uv run kb auth status    # check active auth method
 ```
 
-OAuth login requires `oauth_client_id` in `~/.paper_digest/config.toml` (or `ANTHROPIC_OAUTH_CLIENT_ID` env var). Confirm the client ID and endpoint URLs from [Anthropic's developer documentation](https://docs.anthropic.com).
+OAuth requires `oauth_client_id` in `config.toml`. Confirm credentials from [Anthropic's developer docs](https://docs.anthropic.com).
 
 ### PDF conversion (standalone)
 
@@ -184,9 +195,13 @@ uv run convert-pdf --input https://arxiv.org/abs/2301.07041
 uv run convert-pdf --input paper.pdf --output-dir ./output
 ```
 
+---
+
 ## Scheduling (macOS launchd)
 
-See [LAUNCHD_SETUP.md](LAUNCHD_SETUP.md). The shell wrapper [run_digest.sh](run_digest.sh) is the launchd target.
+See [docs/LAUNCHD_SETUP.md](docs/LAUNCHD_SETUP.md). The shell wrapper [run_digest.sh](run_digest.sh) is the launchd target.
+
+---
 
 ## Requirements
 

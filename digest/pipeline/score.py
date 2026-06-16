@@ -3,8 +3,8 @@
 import json
 from pathlib import Path
 
-from .errors import LLMError, with_retries
-from .llm import ChatProvider
+from ..errors import LLMError, with_retries
+from ..llm import ChatProvider
 
 # 192k tokens to fit ~490 abstracts in one call
 _SCORING_CONTEXT_LENGTH = 196608

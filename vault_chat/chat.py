@@ -1,12 +1,18 @@
 """
-CLI chat tool connecting the Obsidian vault and paper RAG to an LLM.
+Unified knowledge base agent — query and manage via natural language.
 
-Provider is selected from config (default: ollama). Override with CHAT_PROVIDER env var
-or via ~/.paper_digest/config.toml → [chat] provider = "anthropic".
+Handles both retrieval (find papers, search notes, read files) and
+management (add papers, remove documents, list contents, refresh vault).
+The LLM plans and executes tool calls; each call is shown in the terminal
+so the user can see every step.
+
+Provider (set via CHAT_PROVIDER env var or config):
+  ollama     — local Ollama, full access (public + private documents)
+  anthropic  — Anthropic Claude, public documents only; warns on private hits
 
 Auth for Anthropic:
   Option 1: export ANTHROPIC_API_KEY=sk-ant-...
-  Option 2: paper-rag auth login  (browser OAuth → ~/.paper_digest/auth.json)
+  Option 2: kb auth login  (browser OAuth → ~/.seshat/auth.json)
 """
 
 import sys
@@ -19,44 +25,21 @@ from digest.llm import make_provider
 # ── Tool definitions ───────────────────────────────────────────────────────────
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": (
-                "Read the full contents of a specific file from the Obsidian vault. "
-                "Only call this after search_vault or retrieve_papers has identified "
-                "the file as relevant. Do not use this to browse files speculatively."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Relative path to the file within the vault, e.g. 'to-read.md' or 'notes/paper.md'",
-                    }
-                },
-                "required": ["path"],
-            },
-        },
-    },
+    # ── Query tools ──────────────────────────────────────────────────────────
     {
         "type": "function",
         "function": {
             "name": "retrieve_papers",
             "description": (
-                "Search the local paper RAG database for papers relevant to a query. "
-                "Use this to find specific papers, look up details about papers added from "
-                "high-scoring digest runs, or explore research topics. "
-                "Returns up to n_results papers with title, authors, score, track, and a summary excerpt."
+                "Search the knowledge base for research papers. "
+                "Use for questions about papers and scientific topics. "
+                "Always search before answering."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Natural language query"},
-                    "n_results": {"type": "integer", "description": "Number of results (default 5, max 20)", "default": 5},
-                    "score_min": {"type": "integer", "description": "Minimum relevance score (1-10)"},
-                    "track": {"type": "string", "description": "Track filter: 'Track 1' or 'Track 2'"},
+                    "query": {"type": "string"},
+                    "n_results": {"type": "integer", "default": 5},
                 },
                 "required": ["query"],
             },
@@ -65,17 +48,16 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_vault",
+            "name": "search_notes",
             "description": (
-                "Semantically search Obsidian vault notes to discover relevant files. "
-                "Use this to find which notes exist on a topic before reading them in full "
-                "with read_file. Returns matching chunks with file path and title."
+                "Semantically search vault notes and local documents. "
+                "Use to discover relevant files before reading them with read_file."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Natural language query"},
-                    "n_results": {"type": "integer", "description": "Number of results (default 5)", "default": 5},
+                    "query": {"type": "string"},
+                    "n_results": {"type": "integer", "default": 5},
                 },
                 "required": ["query"],
             },
@@ -84,27 +66,199 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "remove_paper",
+            "name": "read_file",
             "description": (
-                "Remove a paper from the RAG database by its document ID. "
-                "Always call retrieve_papers first to find the paper and confirm with the "
-                "user before removing. Never remove without explicit confirmation."
+                "Read the complete, ordered content of one vault file. "
+                "Use this when search_notes has identified a specific file and you need the "
+                "whole document — not just the matching chunks — to give a coherent answer. "
+                "Do not use for discovery; use search_notes for that."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "doc_id": {"type": "string", "description": "Document ID from retrieve_papers results"},
+                    "path": {"type": "string", "description": "Relative path within the vault"},
                 },
-                "required": ["doc_id"],
+                "required": ["path"],
+            },
+        },
+    },
+    # ── Management tools ──────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "add_document",
+            "description": (
+                "Add a paper or document to the knowledge base. "
+                "Source can be an arXiv URL or an absolute path to a local PDF file. "
+                "Two storage modes — ask the user which they want if not specified:\n"
+                "  summary (default): LLM generates a dense ~1000-word summary, then chunks it. "
+                "Fast and compact. Good for most papers.\n"
+                "  full_text: converts the PDF to Markdown and chunks the entire text. "
+                "Slower and larger, but supports paragraph-level retrieval. "
+                "Use for papers the user wants to query in depth.\n"
+                "For local PDFs also ask whether they should be public or private.\n"
+                "Narrate each step as you go."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "arXiv URL (https://arxiv.org/abs/...) or absolute path to a local PDF file",
+                    },
+                    "score": {"type": "integer", "description": "Relevance score 0-10", "default": 0},
+                    "track": {"type": "string", "description": "Research track label", "default": ""},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["summary", "full_text"],
+                        "description": "summary: LLM-generated summary. full_text: full PDF text chunked.",
+                        "default": "summary",
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["public", "private"],
+                        "description": "Visibility for local PDFs. arXiv papers are always public.",
+                        "default": "public",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Override title (for local PDFs without a clear title)",
+                        "default": "",
+                    },
+                },
+                "required": ["source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_document",
+            "description": (
+                "Remove a document from the knowledge base. Two-step process: "
+                "call WITHOUT confirmed first — it shows exactly what will be removed and asks for user confirmation. "
+                "Only call with confirmed=true after the user has explicitly approved. "
+                "Never pass confirmed=true on the first call. "
+                "Set delete_file=true if the user wants the actual file deleted too (vault notes and local PDFs only — arXiv papers have no local file)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "Source URL of the document"},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Set to true only after the user has confirmed removal",
+                        "default": False,
+                    },
+                    "delete_file": {
+                        "type": "boolean",
+                        "description": "Also delete the local file (vault notes and local PDFs only)",
+                        "default": False,
+                    },
+                },
+                "required": ["source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_papers",
+            "description": "List papers currently indexed in the knowledge base.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max papers to show (default 10)", "default": 10},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kb_stats",
+            "description": "Show counts of papers, notes, and total chunks in the knowledge base.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "refresh_vault",
+            "description": (
+                "Incrementally update the vault index — adds new notes, re-indexes changed ones, "
+                "removes deleted ones. Use this for routine updates after editing notes."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "index_vault",
+            "description": (
+                "Build or rebuild the vault index from scratch. "
+                "Use this for the initial setup or when you want a clean re-index. "
+                "Set force=true to clear the existing index first; omit it for a safe incremental run."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Clear the existing vault index before re-indexing",
+                        "default": False,
+                    }
+                },
+                "required": [],
             },
         },
     },
 ]
 
+# ── System prompt ──────────────────────────────────────────────────────────────
+
+_DEFAULT_SYSTEM = """\
+You are a knowledgeable assistant that can both query and manage a local \
+knowledge base of research papers and Obsidian vault notes.
+
+Querying workflow:
+1. Search first — use search_notes and/or retrieve_papers before reading anything.
+2. Read for detail — use read_file only after search has identified a relevant file.
+3. Never call read_file speculatively.
+
+Management:
+- To add a paper or PDF: call add_document with an arXiv URL or local file path. \
+Ask the user whether they want summary or full_text mode if not specified. Narrate each step.
+- To remove a document: call remove_document without confirmed first to preview, \
+then confirm with the user before calling with confirmed=true.
+- To inspect the knowledge base: use list_papers or kb_stats.
+- To index the vault for the first time or force a rebuild: call index_vault.
+- To pick up recent vault changes: call refresh_vault.
+
+Always include the source URL when discussing a paper.\
+"""
+
+
+def build_system_prompt() -> str:
+    """
+    Load the agent system prompt.
+
+    Override by creating ~/.seshat/system_prompt.md.
+    Falls back to the built-in default.
+    """
+    from pathlib import Path as _Path
+    override = _Path.home() / ".seshat" / "system_prompt.md"
+    if override.exists():
+        return override.read_text(encoding="utf-8").rstrip()
+    return _DEFAULT_SYSTEM
+
+
 # ── Vault helpers ──────────────────────────────────────────────────────────────
 
 
-def read_file(vault: Path, rel_path: str) -> str:
+def read_file(vault: Path, rel_path: str, provider_str: str = "ollama") -> str:
     target = (vault / rel_path).resolve()
     try:
         target.relative_to(vault.resolve())
@@ -112,113 +266,371 @@ def read_file(vault: Path, rel_path: str) -> str:
         return f"[Error: '{rel_path}' is outside the vault]"
     if not target.exists() or not target.is_file():
         return f"[Error: file not found: '{rel_path}']"
+    if provider_str == "anthropic":
+        cfg = get_config()
+        if Path(rel_path).parts and Path(rel_path).parts[0] in cfg.private_vault_dirs:
+            return (
+                f"⚠️  '{rel_path}' is private and cannot be read by a cloud provider. "
+                f"Switch to Ollama to access this file."
+            )
     return target.read_text(encoding="utf-8")
 
 
-_DEFAULT_SYSTEM = """\
-You are a knowledgeable assistant with access to an Obsidian vault and a \
-local knowledge base of research papers.
-
-Always follow this workflow when answering:
-1. Search first — use search_vault and/or retrieve_papers to find relevant \
-content before reading anything.
-2. Read for detail — once search identifies a relevant file, use read_file \
-to read its full content.
-3. Never call read_file without first establishing through search that the \
-file is relevant.
-
-Use search_vault for questions about notes, projects, and personal writing. \
-Use retrieve_papers for questions about research papers and scientific topics. \
-Use read_file to get the complete content of a specific file identified by search.\
-"""
+# ── Tool implementations ───────────────────────────────────────────────────────
 
 
-def build_system_prompt(vault: Path) -> str:
-    skill_path = vault / "system" / "SKILL.md"
+def _privacy_warning(has_private: bool) -> str:
+    if not has_private:
+        return ""
     return (
-        skill_path.read_text(encoding="utf-8").rstrip()
-        if skill_path.exists()
-        else _DEFAULT_SYSTEM
+        "\n⚠️  Some relevant private documents were excluded (cloud provider active). "
+        "Switch to Ollama to access them.\n"
     )
 
 
-# ── Tool dispatch ──────────────────────────────────────────────────────────────
+def _retrieve_papers(args: dict, provider_str: str) -> str:
+    try:
+        from digest.kb.store import get_store, search_with_privacy_check
+
+        results, has_private = search_with_privacy_check(
+            query=args["query"],
+            provider=provider_str,
+            n_results=min(int(args.get("n_results", 5)), 20),
+            doc_type="paper",
+            store=get_store(),
+        )
+        warning = _privacy_warning(has_private)
+        if not results:
+            return f"[No papers found.{warning}]"
+        lines = [f"Found {len(results)} paper(s):{warning}\n"]
+        for i, doc in enumerate(results, 1):
+            m = doc.metadata
+            lines.append(
+                f"{i}. [{m.get('score', '?')}/10 · {m.get('track', '')}] {m.get('title', 'untitled')}\n"
+                f"   {m.get('source', '')}\n"
+                f"   {doc.page_content[:300].replace(chr(10), ' ')}...\n"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"[retrieve_papers error: {exc}]"
 
 
-def _dispatch_tool(name: str, arguments: dict, vault: Path) -> str:
+def _search_notes(args: dict, provider_str: str) -> str:
+    try:
+        from digest.kb.store import get_store, search_with_privacy_check
+
+        results, has_private = search_with_privacy_check(
+            query=args["query"],
+            provider=provider_str,
+            n_results=min(int(args.get("n_results", 5)), 20),
+            doc_type="note",
+            store=get_store(),
+        )
+        warning = _privacy_warning(has_private)
+        if not results:
+            return f"[No notes found. Run 'kb index-vault' if vault is not yet indexed.{warning}]"
+        lines = [f"Found {len(results)} note chunk(s):{warning}\n"]
+        for i, doc in enumerate(results, 1):
+            m = doc.metadata
+            lines.append(
+                f"{i}. {m.get('title', 'untitled')}  ({m.get('file_path', 'unknown')})\n"
+                f"   {doc.page_content[:300].replace(chr(10), ' ')}...\n"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"[search_notes error: {exc}]"
+
+
+def _add_document(args: dict, provider_obj) -> str:
+    """
+    Add a paper or local PDF document to the knowledge base.
+
+    source: arXiv URL  → fetch metadata from API, then summary or full-text
+    source: local path → read PDF directly, then summary (LLM reads PDF) or full-text (marker-pdf)
+
+    mode="summary"   (default): LLM generates dense summary → chunk
+    mode="full_text": convert PDF to Markdown → chunk full text
+    """
+    try:
+        from pathlib import Path as _Path
+        from digest.kb.store import add_paper, add_texts, get_store, _source_exists
+
+        source = args.get("source", "")
+        score = int(args.get("score", 0))
+        track = str(args.get("track", ""))
+        mode = args.get("mode", "summary")
+        visibility = args.get("visibility", "public")
+        title_override = args.get("title", "")
+        store = get_store()
+
+        # ── arXiv URL ─────────────────────────────────────────────────────────
+        if source.startswith("http://") or source.startswith("https://"):
+            from digest.arxiv.convert import parse_arxiv_url, download_arxiv_pdf, convert_pdf
+            from digest.arxiv.fetch import fetch_arxiv_paper
+
+            arxiv_id = parse_arxiv_url(source)
+            if not arxiv_id:
+                return f"[Error: could not parse arXiv ID from: {source}]"
+
+            print(f"  Fetching metadata for arXiv:{arxiv_id}...", flush=True)
+            paper = fetch_arxiv_paper(arxiv_id)
+            print(f"  Title: {paper['title']}", flush=True)
+
+            if _source_exists(paper.get("link", ""), store):
+                return f"Already in knowledge base: \"{paper['title']}\""
+
+            if mode == "full_text":
+                import tempfile
+                print("  Downloading PDF...", flush=True)
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = _Path(tmp)
+                    pdf_path = download_arxiv_pdf(arxiv_id, tmp_path)
+                    print("  Converting to Markdown (this may take a moment)...", flush=True)
+                    convert_pdf(pdf_path, tmp_path)
+                    md_path = tmp_path / f"{pdf_path.stem}.md"
+                    if not md_path.exists():
+                        return "[Error: PDF conversion produced no output]"
+                    content = md_path.read_text(encoding="utf-8")
+                print("  Chunking and indexing full text...", flush=True)
+                ids = add_texts(
+                    content=content, doc_type="paper", visibility="public",
+                    source=paper["link"],
+                    extra_metadata={"title": paper.get("title", ""),
+                                    "authors": paper.get("authors", ""),
+                                    "score": score, "track": track},
+                    store=store,
+                )
+            else:
+                print("  Generating summary...", flush=True)
+                summary = provider_obj.summarize(paper["title"], paper["abstract"])
+                ids = add_paper(paper=paper, dense_summary=summary,
+                                score=score, track=track, store=store)
+
+            return (
+                f"Added \"{paper['title']}\" ({mode}, {len(ids)} chunk(s)).\n"
+                f"  Source: {paper['link']}  ·  Score: {score}/10  ·  Track: {track or '(none)'}"
+            )
+
+        # ── Local PDF ─────────────────────────────────────────────────────────
+        pdf_path = _Path(source).expanduser()
+        if not pdf_path.exists():
+            return f"[Error: file not found: {source}]"
+        if pdf_path.suffix.lower() != ".pdf":
+            return f"[Error: only PDF files are supported for local paths: {source}]"
+
+        title = title_override or pdf_path.stem
+        file_source = pdf_path.resolve().as_uri()
+
+        if _source_exists(file_source, store):
+            return f"Already in knowledge base: \"{title}\""
+
+        if mode == "full_text":
+            from digest.arxiv.convert import convert_pdf
+            import tempfile
+            print(f"  Converting {pdf_path.name} to Markdown...", flush=True)
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = _Path(tmp)
+                convert_pdf(pdf_path, tmp_path)
+                md_path = tmp_path / f"{pdf_path.stem}.md"
+                if not md_path.exists():
+                    return "[Error: PDF conversion produced no output]"
+                content = md_path.read_text(encoding="utf-8")
+            print("  Chunking and indexing full text...", flush=True)
+            ids = add_texts(
+                content=content, doc_type="pdf", visibility=visibility,
+                source=file_source,
+                extra_metadata={"title": title, "file_path": str(pdf_path),
+                                "score": score, "track": track},
+                store=store,
+            )
+        else:
+            print(f"  Generating summary from {pdf_path.name}...", flush=True)
+            summary = provider_obj.summarize(title, pdf_path)
+            ids = add_texts(
+                content=f"{title}\n\n{summary}", doc_type="pdf", visibility=visibility,
+                source=file_source,
+                extra_metadata={"title": title, "file_path": str(pdf_path),
+                                "score": score, "track": track},
+                store=store,
+            )
+
+        return (
+            f"Added \"{title}\" ({mode}, {visibility}, {len(ids)} chunk(s)).\n"
+            f"  Source: {file_source}"
+        )
+    except Exception as exc:
+        return f"[add_document error: {exc}]"
+
+
+def _resolve_local_file(source: str, meta: dict, vault: Path) -> "Path | None":
+    """Return the local filesystem path for a document, or None if no local file exists."""
+    from urllib.parse import urlparse
+    if source.startswith("file:///"):
+        return Path(urlparse(source).path)
+    if meta.get("file_path"):
+        return vault / meta["file_path"]
+    return None
+
+
+def _remove_document(args: dict, vault: Path) -> str:
+    try:
+        from digest.kb.store import get_store
+
+        source = args.get("source", "")
+        confirmed = bool(args.get("confirmed", False))
+        delete_file = bool(args.get("delete_file", False))
+        if not source:
+            return "[Error: source URL is required]"
+
+        store = get_store()
+        result = store._collection.get(
+            where={"source": {"$eq": source}}, include=["metadatas"]
+        )
+        ids = result["ids"]
+        if not ids:
+            return f"No documents found with source: {source}"
+
+        meta = result["metadatas"][0] if result["metadatas"] else {}
+        title = meta.get("title", "untitled")
+        doc_type = meta.get("doc_type", "document")
+        local_file = _resolve_local_file(source, meta, vault)
+
+        if not confirmed:
+            lines = [
+                f"Found {len(ids)} chunk(s) to remove:",
+                f"  Title:  {title}",
+                f"  Type:   {doc_type}",
+                f"  Source: {source}",
+            ]
+            if delete_file:
+                if local_file and local_file.exists():
+                    lines.append(f"  File:   {local_file}  ← will be PERMANENTLY DELETED")
+                else:
+                    lines.append("  File:   no local file found (database entry only will be removed)")
+            else:
+                lines.append("  Note:   database entry only — no files will be deleted")
+            lines.append("\nAsk the user to confirm, then call remove_document again with confirmed=true.")
+            return "\n".join(lines)
+
+        # Confirmed — execute
+        store.delete(ids)
+        msg = f"Removed \"{title}\" ({len(ids)} chunk(s)) from the knowledge base."
+        if delete_file:
+            if local_file and local_file.exists():
+                local_file.unlink()
+                msg += f"\nDeleted file: {local_file}"
+            else:
+                msg += "\nNo local file found — database entry only was removed."
+        else:
+            msg += "\nNo files were deleted."
+        return msg
+    except Exception as exc:
+        return f"[remove_document error: {exc}]"
+
+
+def _list_papers(args: dict) -> str:
+    try:
+        from digest.kb.store import get_store, list_papers
+
+        limit = min(int(args.get("limit", 10)), 50)
+        papers = list_papers(limit=limit, store=get_store())
+        if not papers:
+            return "[No papers in knowledge base.]"
+        lines = [f"{len(papers)} paper(s):\n"]
+        for p in papers:
+            lines.append(
+                f"• [{p.get('score', '?')}/10] {p.get('title', 'untitled')}\n"
+                f"  {p.get('source', 'no source')}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"[list_papers error: {exc}]"
+
+
+def _kb_stats() -> str:
+    try:
+        from digest.kb.store import count, count_unique_documents, get_store
+
+        store = get_store()
+        papers = count_unique_documents("paper", "source", store)
+        notes = count_unique_documents("note", "file_path", store)
+        pdfs = count_unique_documents("pdf", "source", store)
+        chunks = count(store)
+        return (
+            f"Knowledge base:\n"
+            f"  {papers} papers · {notes} notes · {pdfs} PDFs\n"
+            f"  {chunks} total chunks"
+        )
+    except Exception as exc:
+        return f"[kb_stats error: {exc}]"
+
+
+def _refresh_vault_tool(vault: Path) -> str:
+    try:
+        from digest.kb.store import get_store, refresh_vault
+
+        added, updated, deleted = refresh_vault(vault, get_store())
+        if added + updated + deleted == 0:
+            return "Vault index is up to date."
+        return f"Vault refreshed: +{added} new, ~{updated} changed, -{deleted} removed"
+    except Exception as exc:
+        return f"[refresh_vault error: {exc}]"
+
+
+def _index_vault_tool(vault: Path, force: bool = False) -> str:
+    try:
+        from digest.kb.store import get_store, refresh_vault
+
+        store = get_store()
+        if force:
+            print("  Clearing existing vault index...", flush=True)
+            try:
+                result = store._collection.get(
+                    where={"doc_type": {"$eq": "note"}}, include=[]
+                )
+                if result["ids"]:
+                    store.delete(result["ids"])
+                    print(f"  Cleared {len(result['ids'])} chunks", flush=True)
+            except Exception:
+                pass
+
+        print(f"  Indexing vault: {vault}", flush=True)
+        added, updated, deleted = refresh_vault(vault, store)
+        return f"Vault indexed: +{added} new, ~{updated} changed, -{deleted} removed"
+    except Exception as exc:
+        return f"[index_vault error: {exc}]"
+
+
+def _dispatch_tool(
+    name: str,
+    arguments: dict,
+    vault: Path,
+    provider_str: str,
+    provider_obj,
+) -> str:
+    # Print the tool call so the user can see what the LLM is doing
+    arg_summary = ", ".join(f"{k}={repr(v)[:40]}" for k, v in arguments.items())
+    print(f"  → {name}({arg_summary})", flush=True)
+
     if name == "read_file":
-        return read_file(vault, arguments.get("path", ""))
+        return read_file(vault, arguments.get("path", ""), provider_str)
     if name == "retrieve_papers":
-        return _retrieve_papers(arguments)
-    if name == "search_vault":
-        return _search_vault(arguments)
-    if name == "remove_paper":
-        return _remove_paper(arguments)
+        return _retrieve_papers(arguments, provider_str)
+    if name == "search_notes":
+        return _search_notes(arguments, provider_str)
+    if name == "add_document":
+        return _add_document(arguments, provider_obj)
+    if name == "remove_document":
+        return _remove_document(arguments, vault)
+    if name == "list_papers":
+        return _list_papers(arguments)
+    if name == "kb_stats":
+        return _kb_stats()
+    if name == "refresh_vault":
+        return _refresh_vault_tool(vault)
+    if name == "index_vault":
+        return _index_vault_tool(vault, bool(arguments.get("force", False)))
     return f"[Error: unknown tool '{name}']"
-
-
-def _retrieve_papers(args: dict) -> str:
-    try:
-        from digest.rag import RAGError, get_papers_collection, retrieve_papers
-
-        results = retrieve_papers(
-            query=args["query"],
-            n_results=min(int(args.get("n_results", 5)), 20),
-            score_min=args.get("score_min"),
-            track=args.get("track"),
-            collection=get_papers_collection(),
-        )
-        if not results:
-            return "[No papers found. The RAG database may be empty — run 'paper-rag add' or wait for a digest run.]"
-        lines = [f"Found {len(results)} paper(s):\n"]
-        for i, r in enumerate(results, 1):
-            lines.append(
-                f"{i}. [{r.get('score', '?')}/10 · {r.get('track', '')}] {r['title']}\n"
-                f"   Authors: {r.get('authors', 'N/A')}\n"
-                f"   Published: {r.get('published', 'N/A')}  |  {r.get('link', '')}\n"
-                f"   Doc ID: {r['doc_id']}\n"
-                f"   Summary: {r.get('document', '')[:300].replace(chr(10), ' ')}...\n"
-            )
-        return "\n".join(lines)
-    except Exception as exc:
-        return f"[RAG papers error: {exc}]"
-
-
-def _search_vault(args: dict) -> str:
-    try:
-        from digest.rag import get_vault_collection, search_vault
-
-        results = search_vault(
-            query=args["query"],
-            n_results=min(int(args.get("n_results", 5)), 20),
-            collection=get_vault_collection(),
-        )
-        if not results:
-            return "[No vault notes found. Run 'paper-rag index-vault' to index your vault.]"
-        lines = [f"Found {len(results)} matching note chunk(s):\n"]
-        for i, r in enumerate(results, 1):
-            lines.append(
-                f"{i}. {r['title']}  ({r['file_path']})\n"
-                f"   Excerpt: {r['chunk'][:300].replace(chr(10), ' ')}...\n"
-            )
-        return "\n".join(lines)
-    except Exception as exc:
-        return f"[RAG vault error: {exc}]"
-
-
-def _remove_paper(args: dict) -> str:
-    try:
-        from digest.rag import count, get_papers_collection, remove_paper
-
-        col = get_papers_collection()
-        before = count(col)
-        remove_paper(args["doc_id"], col)
-        after = count(col)
-        if before != after:
-            return f"Removed paper (doc_id: {args['doc_id']}). {after} papers remain in RAG."
-        return f"No paper found with doc_id: {args['doc_id']}"
-    except Exception as exc:
-        return f"[Remove error: {exc}]"
 
 
 # ── Vault auto-refresh ─────────────────────────────────────────────────────────
@@ -226,13 +638,17 @@ def _remove_paper(args: dict) -> str:
 
 def _auto_refresh_vault(vault: Path) -> None:
     try:
-        from digest.rag import count_vault, get_vault_collection, refresh_vault
+        from digest.kb.store import get_store, refresh_vault
 
-        col = get_vault_collection()
-        if count_vault(col) == 0:
-            print("Vault not yet indexed — run: paper-rag index-vault", flush=True)
+        store = get_store()
+        try:
+            result = store._collection.get(where={"doc_type": {"$eq": "note"}}, include=[])
+            if not result["ids"]:
+                print("Vault not yet indexed — run: kb index-vault", flush=True)
+                return
+        except Exception:
             return
-        added, updated, deleted = refresh_vault(vault, col)
+        added, updated, deleted = refresh_vault(vault, store)
         if added + updated + deleted > 0:
             print(
                 f"Vault index refreshed: +{added} new, ~{updated} changed, -{deleted} removed",
@@ -242,16 +658,20 @@ def _auto_refresh_vault(vault: Path) -> None:
         print(f"Warning: vault index refresh failed: {exc}", flush=True)
 
 
-# ── Session loop ───────────────────────────────────────────────────────────────
+# ── Session ────────────────────────────────────────────────────────────────────
 
 
 def run_session(vault: Path) -> None:
     cfg = get_config()
     provider = make_provider(cfg.provider)
-    system_prompt = build_system_prompt(vault)
+    system_prompt = build_system_prompt()
     messages: list[dict] = []
 
-    provider_label = f"Anthropic ({cfg.anthropic_model})" if cfg.provider == "anthropic" else f"Ollama ({cfg.ollama_model})"
+    provider_label = (
+        f"Anthropic ({cfg.anthropic_model})"
+        if cfg.provider == "anthropic"
+        else f"Ollama ({cfg.ollama_model})"
+    )
     print(f"Vault chat ready. Provider: {provider_label}  Vault: {vault}")
     print("Type your question and press Enter. Ctrl-C or Ctrl-D to quit.\n")
 
@@ -261,22 +681,22 @@ def run_session(vault: Path) -> None:
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             break
-
         if not user_input:
             continue
 
         messages.append({"role": "user", "content": user_input})
-
         try:
             reply = provider.agentic_turn(
                 messages=messages,
                 tools=TOOLS,
-                dispatch_fn=lambda name, args: _dispatch_tool(name, args, vault),
+                dispatch_fn=lambda name, args: _dispatch_tool(
+                    name, args, vault, cfg.provider, provider
+                ),
                 system=system_prompt,
             )
         except LLMError as exc:
             print(f"[LLM error: {exc}]")
-            messages.pop()  # Remove the failed user message so the user can retry
+            messages.pop()
             continue
 
         print(f"\nAssistant: {reply}\n")
@@ -291,7 +711,7 @@ def main() -> None:
     cfg = get_config()
     parser = argparse.ArgumentParser(
         prog="vault-chat",
-        description="Multi-turn chat over an Obsidian vault and the local paper RAG database.",
+        description="Knowledge base agent — query and manage via natural language.",
     )
     parser.add_argument(
         "vault",
@@ -301,7 +721,6 @@ def main() -> None:
     args = parser.parse_args()
 
     vault = Path(args.vault).expanduser() if args.vault else cfg.vault_path
-
     if not vault.exists():
         print(f"Error: vault path does not exist: {vault}", file=sys.stderr)
         sys.exit(1)

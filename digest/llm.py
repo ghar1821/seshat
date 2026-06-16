@@ -173,7 +173,7 @@ def _block_to_dict(block) -> dict:
 class AnthropicProvider:
     def __init__(self, model: str, auth_file: Path | None = None) -> None:
         self.model = model
-        self._auth_file = auth_file or Path.home() / ".paper_digest" / "auth.json"
+        self._auth_file = auth_file or Path.home() / ".seshat" / "auth.json"
         self._client = None
 
     def _get_client(self):

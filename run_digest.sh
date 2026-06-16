@@ -9,7 +9,7 @@ LOG_DIR="$HOME/Documents/papers/digest/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/digest-$(date +%Y-%m-%d_%H-%M-%S).log"
 
-echo "=== paper_digest started at $(date) ===" >> "$LOG_FILE"
+echo "=== seshat digest started at $(date) ===" >> "$LOG_FILE"
 
 # Launch Ollama if not already running, then wait for it to be ready
 if ! pgrep -x "ollama" > /dev/null; then
@@ -27,4 +27,4 @@ fi
 
 cd "$SCRIPT_DIR"
 "$SCRIPT_DIR/.venv/bin/python" -u -m digest.run >> "$LOG_FILE" 2>&1
-echo "=== paper_digest finished at $(date) ===" >> "$LOG_FILE"
+echo "=== seshat digest finished at $(date) ===" >> "$LOG_FILE"

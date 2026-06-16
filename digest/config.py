@@ -3,10 +3,10 @@ Central configuration for paper_digest.
 
 Resolution order (later wins):
   1. Built-in defaults
-  2. ~/.paper_digest/config.toml
+  2. ~/.seshat/config.toml
   3. Environment variables
 
-Example ~/.paper_digest/config.toml:
+Example ~/.seshat/config.toml:
 
     [digest]
     ollama_model = "gemma4:26b"
@@ -17,7 +17,7 @@ Example ~/.paper_digest/config.toml:
     # arxiv_categories = [["cs.LG", 150], ["cs.AI", 80]]
 
     [rag]
-    rag_dir = "~/.paper_digest/rag"
+    rag_dir = "~/.seshat/rag"
     embed_model = "all-MiniLM-L6-v2"
     chunk_size = 2048
     chunk_overlap = 256
@@ -37,7 +37,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CONFIG_FILE = Path.home() / ".paper_digest" / "config.toml"
+CONFIG_FILE = Path.home() / ".seshat" / "config.toml"
 
 _DEFAULT_ARXIV_CATS: list[tuple[str, int]] = [
     ("cs.LG", 150),
@@ -59,7 +59,7 @@ class Config:
     arxiv_cats: list[tuple[str, int]] = field(default_factory=lambda: list(_DEFAULT_ARXIV_CATS))
 
     # ── RAG ───────────────────────────────────────────────────────────────────
-    rag_dir: Path = field(default_factory=lambda: Path("~/.paper_digest/rag").expanduser())
+    rag_dir: Path = field(default_factory=lambda: Path("~/.seshat/rag").expanduser())
     embed_model: str = "all-MiniLM-L6-v2"
     chunk_size: int = 2048
     chunk_overlap: int = 256
@@ -67,9 +67,11 @@ class Config:
     # ── Chat ──────────────────────────────────────────────────────────────────
     provider: str = "ollama"  # "ollama" | "anthropic"
     vault_path: Path = field(default_factory=lambda: Path("~/vault").expanduser())
+    # Vault folders whose contents are treated as private (local Ollama only)
+    private_vault_dirs: list[str] = field(default_factory=lambda: ["private"])
 
     # ── Auth ──────────────────────────────────────────────────────────────────
-    auth_file: Path = field(default_factory=lambda: Path("~/.paper_digest/auth.json").expanduser())
+    auth_file: Path = field(default_factory=lambda: Path("~/.seshat/auth.json").expanduser())
     oauth_client_id: str = ""
     oauth_auth_url: str = "https://claude.ai/oauth/authorize"
     oauth_token_url: str = "https://api.anthropic.com/oauth/token"
@@ -110,6 +112,8 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
             cfg.provider = str(c["provider"])
         if "vault_path" in c:
             cfg.vault_path = Path(str(c["vault_path"])).expanduser()
+        if "private_vault_dirs" in c:
+            cfg.private_vault_dirs = [str(d) for d in c["private_vault_dirs"]]
 
         a = data.get("auth", {})
         if "oauth_client_id" in a:

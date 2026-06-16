@@ -1,0 +1,308 @@
+# Design Document
+
+## Purpose
+
+A personal research tool that:
+
+1. Fetches papers from arXiv weekly and scores them with an LLM
+2. Writes a tiered Markdown digest (Must-Read / Worth Reading / Skim)
+3. Indexes papers and vault notes into a local knowledge base
+4. Provides a conversational agent for querying and managing the knowledge base
+
+---
+
+## Repository layout
+
+```
+├── digest/                          # Python package
+│   ├── config.py                    # Central configuration
+│   ├── errors.py                    # Domain exceptions + retry decorator
+│   ├── llm.py                       # LLM provider abstraction
+│   │
+│   ├── arxiv/                       # arXiv paper fetching and PDF conversion
+│   │   ├── fetch.py                 # Fetch papers from arXiv API
+│   │   └── convert.py               # Download arXiv PDFs + convert to Markdown
+│   │
+│   ├── pipeline/                    # Automated weekly digest
+│   │   ├── run.py                   # Entry point: orchestrates full digest run
+│   │   ├── score.py                 # LLM-based paper scoring
+│   │   ├── format.py                # Markdown digest renderer
+│   │   └── prompts/
+│   │       └── prompt_filter_score.md
+│   │
+│   └── kb/                          # Knowledge base management
+│       ├── store.py                 # Vector store operations (LangChain + ChromaDB)
+│       ├── cli.py                   # `kb` CLI entry point
+│       └── prompts/
+│           └── paper_summary.md
+│
+├── vault_chat/
+│   └── chat.py                      # `vault-chat` entry point (KB agent)
+│
+├── docs/
+│   ├── DESIGN.md                    # This file
+│   └── CHANGELOG.md
+├── run_digest.sh                    # Shell wrapper for launchd
+└── pyproject.toml
+```
+
+### Module responsibilities at a glance
+
+| Module | Concern |
+|---|---|
+| `digest/arxiv/` | Fetching papers from arXiv API; downloading and converting PDFs |
+| `digest/pipeline/` | Weekly automated digest: scoring, formatting, orchestration |
+| `digest/kb/` | Knowledge base: vector store operations and the `kb` CLI |
+| `vault_chat/chat.py` | Conversational agent: query and manage via natural language |
+| `digest/llm.py` | Shared: LLM provider abstraction (Ollama + Anthropic) |
+| `digest/config.py` | Shared: central configuration |
+| `digest/errors.py` | Shared: domain exceptions and retry decorator |
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `langchain-chroma` | LangChain wrapper over ChromaDB vector store |
+| `langchain-huggingface` | HuggingFace embeddings via LangChain |
+| `langchain-text-splitters` | `RecursiveCharacterTextSplitter` for document chunking |
+| `chromadb` | Underlying persistent vector store (SQLite + HNSW) |
+| `sentence-transformers` | Local embedding model (`all-MiniLM-L6-v2`) |
+| `anthropic` | Anthropic Claude API client |
+| `ollama` | Local Ollama LLM client |
+| `marker-pdf` | High-quality PDF-to-Markdown conversion for scientific papers |
+| `requests` | HTTP client (arXiv API) |
+
+---
+
+## CLI entry points
+
+All require `uv run` prefix unless the venv is activated (`source .venv/bin/activate`).
+
+| Command | Module | Purpose |
+|---|---|---|
+| `uv run run-digest` | `digest.pipeline.run:main` | Run the weekly digest pipeline |
+| `uv run vault-chat` | `vault_chat.chat:main` | Start the KB agent chat session |
+| `uv run kb` | `digest.kb.cli:main` | Manage the knowledge base (CLI) |
+| `uv run convert-pdf` | `digest.arxiv.convert:main` | Convert a PDF to Markdown (standalone) |
+
+---
+
+## Runtime file locations
+
+| Path | Contents |
+|---|---|
+| `~/.seshat/config.toml` | User configuration |
+| `~/.seshat/rag/` | ChromaDB persistent store |
+| `~/.seshat/auth.json` | Anthropic OAuth tokens |
+| `~/Documents/papers/digest/` | Weekly digest `.md` output files (configurable) |
+
+---
+
+## Configuration — `digest/config.py`
+
+Resolution order (later wins): defaults → `~/.seshat/config.toml` → env vars.
+
+| Field | Default | Env var | Description |
+|---|---|---|---|
+| `ollama_model` | `gemma4:26b` | `OLLAMA_MODEL` | Ollama model |
+| `anthropic_model` | `claude-sonnet-4-6` | `ANTHROPIC_MODEL` | Anthropic model |
+| `output_dir` | `~/Documents/papers/digest` | — | Digest output directory |
+| `max_results` | `10` | — | Max papers per digest |
+| `arxiv_cats` | 6 categories | — | `[(category, limit), ...]` |
+| `rag_dir` | `~/.seshat/rag` | — | ChromaDB storage path |
+| `embed_model` | `all-MiniLM-L6-v2` | — | Embedding model |
+| `chunk_size` | `2048` | — | Characters per chunk |
+| `chunk_overlap` | `256` | — | Overlap between chunks |
+| `provider` | `ollama` | `CHAT_PROVIDER` | Active LLM provider |
+| `vault_path` | `~/vault` | `VAULT_PATH` | Obsidian vault root |
+| `private_vault_dirs` | `["private"]` | — | Vault folders treated as private |
+| `auth_file` | `~/.seshat/auth.json` | — | OAuth token storage |
+| `oauth_client_id` | `""` | `ANTHROPIC_OAUTH_CLIENT_ID` | Required for `kb auth login` |
+
+---
+
+## Knowledge base — `digest/kb/store.py`
+
+Single LangChain + ChromaDB collection (`knowledge_base`).
+
+### Document schema
+
+```
+page_content : str   — chunked text (embedded)
+metadata:
+  date_added  : str  — ISO timestamp
+  doc_type    : str  — "paper" | "note" | "pdf"
+  visibility  : str  — "public" | "private"
+  source      : str  — arXiv/DOI URL, or "local" for notes/PDFs without URL
+  title       : str  — display title
+  authors     : str  — papers only
+  score       : int  — relevance 0–10, papers only
+  track       : str  — research track, papers only
+  file_path   : str  — vault-relative path, notes only
+  content_hash: str  — SHA-256 for change detection, notes only
+```
+
+### Privacy model
+
+| | Ollama (local) | Anthropic (cloud) |
+|---|---|---|
+| `"public"` | ✓ | ✓ |
+| `"private"` | ✓ | Excluded; warning shown |
+
+Files under `private_vault_dirs` folders → `"private"`. All papers → `"public"`.
+
+### Key functions
+
+| Function | Description |
+|---|---|
+| `get_store()` | Process-wide Chroma singleton |
+| `add_paper(paper, summary, score, track)` | Add paper; idempotent by source URL |
+| `add_papers_batch(entries)` | Batch add from digest; no extra LLM call |
+| `add_texts(content, doc_type, visibility, source, ...)` | Low-level chunk and add |
+| `search(query, n_results, visibility, doc_type)` | Semantic search with filters |
+| `search_with_privacy_check(query, provider, ...)` | Provider-aware; returns `(results, has_private_hits)` |
+| `delete_by_metadata(key, value)` | Delete all chunks matching key=value |
+| `count()` · `count_unique_documents()` · `list_papers()` | Inspection |
+| `get_visibility(file_path, vault_root)` | Derive visibility from folder path |
+| `index_vault_file(file_path, vault_root)` | Chunk and index one vault file |
+| `refresh_vault(vault_root)` | Incremental sync; returns `(added, updated, deleted)` |
+
+---
+
+## arXiv module — `digest/arxiv/`
+
+`fetch.py`:
+- `fetch_arxiv(cat, max_results)` — batch fetch by category, `@with_retries`
+- `fetch_arxiv_paper(arxiv_id)` — single paper by ID; correct `source` from `<primary_category>` tag
+- `deduplicate(papers)` — remove duplicate titles
+
+`convert.py`:
+- `parse_arxiv_url(url)` — extract arXiv ID from any URL format
+- `download_arxiv_pdf(arxiv_id, dest_dir)` — download PDF
+- `convert_pdf(pdf_path, output_dir)` — convert PDF to Markdown via `marker-pdf`
+- Standalone CLI: `uv run convert-pdf --input <url|path>`
+
+---
+
+## Digest pipeline — `digest/pipeline/`
+
+`run.py` orchestrates:
+```
+make_provider(cfg.provider, options={"num_ctx": 196608})
+  ↓
+fetch_arxiv() × 6 categories  →  ~490 paper dicts
+deduplicate()                  →  ~400 unique papers
+  ↓
+filter_and_score(papers, provider, max_results, PROMPT_PATH)
+  →  selected: [{index, track, score, slop, vetted, summary, why}]
+  ↓
+format_digest()  →  ~/Documents/papers/digest/digest-{date}.md
+  ↓
+add_papers_batch(score >= 9)  →  knowledge base
+```
+
+`score.py` — `filter_and_score()` sends all abstracts in one 192k-token prompt, parses JSON response.
+`format.py` — `format_digest()` renders tiered Markdown digest.
+`prompts/prompt_filter_score.md` — scoring rubric loaded at run time.
+
+---
+
+## LLM providers — `digest/llm.py`
+
+`ChatProvider` protocol — three methods used across the system:
+
+```python
+complete(messages, max_tokens, context_length) -> str
+# Single-shot completion. context_length sets Ollama num_ctx; ignored by Anthropic.
+
+summarize(title, source, max_tokens) -> str
+# Dense paper summary. source: str (abstract) or Path (PDF → base64).
+
+agentic_turn(messages, tools, dispatch_fn, system) -> str
+# Full tool-calling loop. Modifies messages in place.
+```
+
+`make_provider(spec, model, options)` factory:
+- `"anthropic"` → `AnthropicProvider` (checks `ANTHROPIC_API_KEY`, then `auth.json`)
+- `"ollama"` or model name → `OllamaProvider`
+
+---
+
+## KB agent — `vault_chat/chat.py`
+
+Single `run_session(vault)` loop using `provider.agentic_turn()`. Every tool call is printed to the terminal (`→ tool_name(args)`) so the user sees each step.
+
+System prompt loaded from `~/.seshat/system_prompt.md` if present; otherwise the built-in default is used. The vault path has no effect on the system prompt.
+
+### Tools
+
+| Tool | Concern | Cloud provider behaviour |
+|---|---|---|
+| `retrieve_papers` | Search indexed papers | Public only + warning if private matched |
+| `search_notes` | Search vault notes | Public only + warning if private matched |
+| `read_file` | Read one vault file in full (after search identifies it) | Blocks files in `private_vault_dirs` |
+| `add_document` | Add a paper or PDF; two modes (see below) | Any |
+| `remove_document` | Two-step remove: preview → confirm; optionally delete local file | Any |
+| `list_papers` | List indexed papers | Any |
+| `kb_stats` | Document and chunk counts | Any |
+| `refresh_vault` | Incremental vault sync (new/changed/deleted files) | Any |
+| `index_vault` | Build or rebuild vault index; `force=true` clears first | Any |
+
+### `add_document` storage modes
+
+The tool exposes two modes; the LLM asks the user which to use if not specified:
+
+| Mode | Flow | Chunks stored | Best for |
+|---|---|---|---|
+| `summary` (default) | abstract/PDF → LLM generates ~1000-word summary → chunk | 1–2 | Most papers — fast, compact |
+| `full_text` | download PDF → marker-pdf → chunk raw Markdown | Many | Papers the user wants to query at paragraph level |
+
+For local PDFs, `visibility` (`"public"` / `"private"`) and an optional `title` override are also accepted.
+
+### `remove_document` two-step flow
+
+1. Call without `confirmed` — returns preview: title, type, source, chunk count, and whether a local file would be deleted.
+2. The LLM presents the preview and asks the user to confirm.
+3. Call with `confirmed=true` (and optionally `delete_file=true`) — executes the deletion.
+
+Passing `confirmed=true` on the first call is explicitly prohibited in the tool description.
+
+---
+
+## Error handling — `digest/errors.py`
+
+```
+PaperDigestError
+├── FetchError          arXiv API failures
+├── LLMError            LLM failures
+├── RAGError            Vector store failures
+└── AuthenticationError Missing credentials
+```
+
+`@with_retries(max_attempts, backoff, exceptions)` — used in `arxiv/fetch.py` and `pipeline/score.py`.
+
+---
+
+## Data flows
+
+### Weekly digest
+
+```
+arXiv → fetch → deduplicate → score → format digest → index score≥9 papers
+```
+
+### Vault chat turn
+
+```
+User message → provider.agentic_turn() → tool loop → reply
+  retrieve_papers / search_notes  → search_with_privacy_check()
+  read_file                       → privacy check → filesystem read
+  add_document (summary mode)     → fetch metadata → provider.summarize() → add_texts()
+  add_document (full_text mode)   → download PDF → convert_pdf() → chunk → add_texts()
+  remove_document (unconfirmed)   → lookup metadata → return preview
+  remove_document (confirmed)     → store.delete() → optionally unlink local file
+  index_vault                     → optionally clear notes → refresh_vault()
+  refresh_vault                   → compare hashes → index new/changed, delete removed
+```

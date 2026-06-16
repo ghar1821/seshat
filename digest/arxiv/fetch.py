@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from .errors import FetchError, with_retries
+from ..errors import FetchError, with_retries
 
 _NS = {"atom": "http://www.w3.org/2005/Atom"}
 _CATEGORY_RE = re.compile(r"\d{4}\.\d{4,5}")

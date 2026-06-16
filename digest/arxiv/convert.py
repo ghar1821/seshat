@@ -4,12 +4,12 @@ Convert a PDF (local file or arXiv URL) to Markdown with extracted images.
 Uses marker-pdf for high-quality scientific paper conversion.
 
 Usage:
-    uv run -m digest.convert --input <pdf_path_or_arxiv_url> [--output-dir <dir>]
+    uv run -m digest.arxiv.convert --input <pdf_path_or_arxiv_url> [--output-dir <dir>]
 
 Examples:
-    uv run -m digest.convert --input paper.pdf
-    uv run -m digest.convert --input https://arxiv.org/abs/2301.07041
-    uv run -m digest.convert --input paper.pdf --output-dir ./output
+    uv run -m digest.arxiv.convert --input paper.pdf
+    uv run -m digest.arxiv.convert --input https://arxiv.org/abs/2301.07041
+    uv run -m digest.arxiv.convert --input paper.pdf --output-dir ./output
 """
 
 import argparse

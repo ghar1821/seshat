@@ -1,22 +1,25 @@
 [project]
-name = "paper-digest"
+name = "seshat"
 version = "0.1.0"
-description = "Daily arXiv paper digest with local LLM scoring and Obsidian vault chat"
+description = "Personal knowledge base with arXiv paper digest and LLM agent"
 requires-python = ">=3.12"
 dependencies = [
     "marker-pdf>=1.10.2",
     "ollama>=0.6.1",
     "requests>=2.33.1",
+    "anthropic>=0.46.0",
     "chromadb>=0.6.0",
     "sentence-transformers>=3.0.0",
-    "anthropic>=0.46.0",
+    "langchain-chroma>=0.1.0",
+    "langchain-huggingface>=0.1.0",
+    "langchain-text-splitters>=0.3.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["digest*", "vault_chat*"]
 
 [project.scripts]
-run-digest = "digest.run:main"
-convert-pdf = "digest.convert:main"
-vault-chat = "vault_chat.chat:main"
-kb = "digest.kb:main"
+run-digest  = "digest.pipeline.run:main"
+convert-pdf = "digest.arxiv.convert:main"
+vault-chat  = "vault_chat.chat:main"
+kb          = "digest.kb.cli:main"
