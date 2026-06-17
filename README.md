@@ -183,7 +183,11 @@ uv run kb add-digest ~/Documents/papers/digest/ --min-score 7
 
 # Inspect
 uv run kb list
+uv run kb list --limit 100
 uv run kb stats
+
+# Clear everything (prompts for confirmation, no files deleted)
+uv run kb clear
 
 # Remove (shows preview and asks for confirmation; optionally deletes the source file)
 uv run kb remove https://arxiv.org/abs/2406.04093
@@ -200,18 +204,17 @@ Fetches papers from arXiv, scores them against the relevance prompt, writes a ti
 
 ### Anthropic authentication
 
-**Option 1 — API key (recommended):**
+**Option 1 — environment variable:**
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**Option 2 — claude.ai OAuth** (one-time browser login, token persists in `~/.seshat/auth.json`):
-```bash
-uv run kb auth login    # opens browser, saves token
-uv run kb auth status   # show active auth method
+**Option 2 — config file** (persists across sessions, never leaves your machine):
+```toml
+# ~/.seshat/config.toml
+[auth]
+api_key = "sk-ant-..."
 ```
-
-OAuth requires `oauth_client_id` set in `config.toml`.
 
 ### PDF conversion (standalone)
 

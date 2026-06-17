@@ -130,6 +130,7 @@ def add_paper(
     score: int = 0,
     track: str = "",
     store: Chroma | None = None,
+    storage_mode: str = "summary",
 ) -> list[str]:
     """Add a paper to the knowledge base. Papers are always public. Skips if already indexed."""
     s = store or get_store()
@@ -147,6 +148,7 @@ def add_paper(
             "authors": paper.get("authors", ""),
             "score": int(score),
             "track": str(track),
+            "storage_mode": storage_mode,
         },
         store=s,
     )
@@ -295,21 +297,25 @@ def list_papers(
     s = store or get_store()
     try:
         result = s._collection.get(
-            where={"doc_type": {"$eq": "paper"}},
+            where={"doc_type": {"$in": ["paper", "pdf"]}},
             include=["metadatas"],
         )
     except Exception as exc:
         raise RAGError(f"List failed: {exc}") from exc
 
-    seen: set[str] = set()
-    papers = []
+    chunk_counts: dict[str, int] = {}
+    first_meta: dict[str, dict] = {}
     for meta in result["metadatas"]:
         src = meta.get("source", "")
-        if src and src not in seen:
-            seen.add(src)
-            papers.append(meta)
-            if len(papers) >= limit:
-                break
+        if not src:
+            continue
+        chunk_counts[src] = chunk_counts.get(src, 0) + 1
+        if src not in first_meta:
+            first_meta[src] = meta
+
+    papers = []
+    for src, meta in list(first_meta.items())[:limit]:
+        papers.append({**meta, "chunk_count": chunk_counts[src]})
     return papers
 
 

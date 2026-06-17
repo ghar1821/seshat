@@ -12,7 +12,7 @@ Provider (set via CHAT_PROVIDER env var or config):
 
 Auth for Anthropic:
   Option 1: export ANTHROPIC_API_KEY=sk-ant-...
-  Option 2: kb auth login  (browser OAuth → ~/.seshat/auth.json)
+  Option 2: add api_key to [auth] in ~/.seshat/config.toml
 """
 
 import sys

@@ -5,9 +5,6 @@ Manages a local vector database of research papers and Obsidian vault notes
 that vault-chat draws on during conversations.
 
 Subcommands:
-  auth login        Browser OAuth PKCE flow → ~/.seshat/auth.json
-  auth status       Show active auth method
-
   add <url|path>    Add a paper by arXiv URL or local PDF path
   add-digest <path> Import papers from digest Markdown file(s)
   list              List indexed papers
@@ -19,7 +16,6 @@ Subcommands:
   refresh-vault     Incremental update of vault index
 
 Usage examples:
-  uv run kb auth login
   uv run kb add https://arxiv.org/abs/2406.04093 --score 9 --track "Track 1"
   uv run kb add paper.pdf --provider anthropic
   uv run kb add-digest ~/Documents/papers/digest/
@@ -31,142 +27,9 @@ Usage examples:
 """
 
 import argparse
-import base64
-import hashlib
-import json
-import os
 import re
 import sys
-import urllib.parse
-import webbrowser
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
-
-CALLBACK_TIMEOUT = 120
-
-
-# ── OAuth PKCE ────────────────────────────────────────────────────────────────
-
-
-def _generate_pkce() -> tuple[str, str]:
-    code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-    digest = hashlib.sha256(code_verifier.encode()).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-    return code_verifier, code_challenge
-
-
-def _wait_for_oauth_callback() -> str | None:
-    auth_code: list[str] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            if "code" in params:
-                auth_code.append(params["code"][0])
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(
-                    b"<html><body><h2>Authenticated!</h2>"
-                    b"<p>You can close this tab and return to the terminal.</p>"
-                    b"</body></html>"
-                )
-            else:
-                error = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("error", ["unknown"])[0]
-                self.send_response(400)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(f"<html><body><h2>Auth error: {error}</h2></body></html>".encode())
-
-        def log_message(self, *args: object) -> None:
-            pass
-
-    server = HTTPServer(("localhost", 8080), Handler)
-    server.timeout = CALLBACK_TIMEOUT
-    Thread(target=server.handle_request, daemon=True).start()
-    import time
-    time.sleep(CALLBACK_TIMEOUT + 2)
-    server.server_close()
-    return auth_code[0] if auth_code else None
-
-
-def _save_auth(token_data: dict, auth_file: Path) -> None:
-    auth_file.parent.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    record = {
-        "access_token": token_data["access_token"],
-        "refresh_token": token_data.get("refresh_token", ""),
-        "expires_at": datetime.fromtimestamp(
-            now.timestamp() + token_data.get("expires_in", 3600), tz=timezone.utc
-        ).isoformat(),
-        "saved_at": now.isoformat(),
-    }
-    auth_file.write_text(json.dumps(record, indent=2))
-    auth_file.chmod(0o600)
-
-
-# ── Auth subcommands ───────────────────────────────────────────────────────────
-
-
-def cmd_auth_login() -> None:
-    from ..config import get_config
-    cfg = get_config()
-    if not cfg.oauth_client_id:
-        print("Error: oauth_client_id is not configured.", file=sys.stderr)
-        print("  Add to ~/.seshat/config.toml:", file=sys.stderr)
-        print("    [auth]", file=sys.stderr)
-        print("    oauth_client_id = \"your-client-id\"", file=sys.stderr)
-        print("  Confirm OAuth credentials from https://docs.anthropic.com", file=sys.stderr)
-        sys.exit(1)
-
-    import requests
-    code_verifier, code_challenge = _generate_pkce()
-    state = base64.urlsafe_b64encode(os.urandom(16)).decode()
-    params = urllib.parse.urlencode({
-        "response_type": "code", "client_id": cfg.oauth_client_id,
-        "redirect_uri": "http://localhost:8080/callback", "scope": "api",
-        "state": state, "code_challenge": code_challenge, "code_challenge_method": "S256",
-    })
-    print("Opening browser for claude.ai authentication...")
-    webbrowser.open(f"{cfg.oauth_auth_url}?{params}")
-    print(f"Waiting for callback (up to {CALLBACK_TIMEOUT}s)...")
-    code = _wait_for_oauth_callback()
-    if not code:
-        print("Error: timed out waiting for OAuth callback.", file=sys.stderr)
-        sys.exit(1)
-    resp = requests.post(cfg.oauth_token_url, data={
-        "grant_type": "authorization_code", "code": code,
-        "redirect_uri": "http://localhost:8080/callback",
-        "client_id": cfg.oauth_client_id, "code_verifier": code_verifier,
-    }, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
-    resp.raise_for_status()
-    _save_auth(resp.json(), cfg.auth_file)
-    print(f"Authenticated. Credentials saved to {cfg.auth_file}")
-
-
-def cmd_auth_status() -> None:
-    from ..config import get_config
-    cfg = get_config()
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        print("Active: ANTHROPIC_API_KEY environment variable")
-        return
-    if cfg.auth_file.exists():
-        auth = json.loads(cfg.auth_file.read_text())
-        try:
-            exp = datetime.fromisoformat(auth.get("expires_at", ""))
-            remaining = exp - datetime.now(timezone.utc)
-            if remaining.total_seconds() > 0:
-                print(f"Active: claude.ai OAuth token (expires in ~{int(remaining.total_seconds() / 60)} min)")
-            else:
-                print("Stored OAuth token is expired. Run: kb auth login")
-        except ValueError:
-            print(f"Stored auth file: {cfg.auth_file}")
-        return
-    print("No credentials configured.")
-    print("  Option 1: export ANTHROPIC_API_KEY=sk-ant-...")
-    print("  Option 2: kb auth login  (browser OAuth)")
 
 
 # ── Add ───────────────────────────────────────────────────────────────────────
@@ -180,8 +43,14 @@ def cmd_add(args: argparse.Namespace) -> None:
     from .store import add_paper, add_texts, get_store
 
     cfg = get_config()
-    provider = make_provider(args.provider or cfg.provider)
     store = get_store()
+    _provider = None
+
+    def get_provider():
+        nonlocal _provider
+        if _provider is None:
+            _provider = make_provider(args.provider or cfg.provider)
+        return _provider
     input_str: str = args.input
 
     if input_str.startswith("http://") or input_str.startswith("https://"):
@@ -222,32 +91,57 @@ def cmd_add(args: argparse.Namespace) -> None:
                         "authors": paper.get("authors", ""),
                         "score": int(args.score),
                         "track": str(args.track),
+                        "storage_mode": "full_text",
                     },
                     store=store,
                 )
                 print(f"Added (full text, {len(ids)} chunks): {paper['link']}")
         else:
             print("Generating summary...")
-            summary = provider.summarize(paper["title"], paper["abstract"])
+            summary = get_provider().summarize(paper["title"], paper["abstract"])
             add_paper(paper=paper, dense_summary=summary, score=args.score,
-                      track=args.track, store=store)
+                      track=args.track, store=store, storage_mode="summary")
             print(f"Added (summary): {paper['link']}")
 
     elif Path(input_str).exists() and Path(input_str).suffix.lower() == ".pdf":
         pdf_path = Path(input_str)
         title = args.title or pdf_path.stem
         visibility = args.visibility
-        print(f"Generating summary from PDF ({visibility}): {pdf_path.name}...")
-        summary = provider.summarize(title, pdf_path)
-        add_texts(
-            content=f"{title}\n\n{summary}",
-            doc_type="pdf",
-            visibility=visibility,
-            source=pdf_path.resolve().as_uri(),
-            extra_metadata={"title": title, "file_path": str(pdf_path)},
-            store=store,
-        )
-        print(f"Added: {pdf_path.name} ({visibility})")
+
+        if args.full_text:
+            from ..arxiv.convert import convert_pdf
+            import tempfile
+            print(f"Converting PDF to Markdown ({visibility}): {pdf_path.name}...")
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                convert_pdf(pdf_path, tmp_path)
+                md_path = tmp_path / f"{pdf_path.stem}.md"
+                if not md_path.exists():
+                    print("Error: PDF conversion produced no output.", file=sys.stderr)
+                    sys.exit(1)
+                full_text = md_path.read_text(encoding="utf-8")
+            print("Chunking and indexing full text...")
+            ids = add_texts(
+                content=full_text,
+                doc_type="pdf",
+                visibility=visibility,
+                source=pdf_path.resolve().as_uri(),
+                extra_metadata={"title": title, "file_path": str(pdf_path), "storage_mode": "full_text"},
+                store=store,
+            )
+            print(f"Added (full text, {len(ids)} chunks): {pdf_path.name} ({visibility})")
+        else:
+            print(f"Generating summary from PDF ({visibility}): {pdf_path.name}...")
+            summary = get_provider().summarize(title, pdf_path)
+            add_texts(
+                content=f"{title}\n\n{summary}",
+                doc_type="pdf",
+                visibility=visibility,
+                source=pdf_path.resolve().as_uri(),
+                extra_metadata={"title": title, "file_path": str(pdf_path), "storage_mode": "summary"},
+                store=store,
+            )
+            print(f"Added: {pdf_path.name} ({visibility})")
 
     else:
         print(f"Error: '{input_str}' is not a valid arXiv URL or PDF path.", file=sys.stderr)
@@ -343,7 +237,9 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("No papers in knowledge base.")
         return
     for p in papers:
-        print(f"[{p.get('score', '?')}/10] {p.get('title', 'untitled')}")
+        chunks = p.get("chunk_count", "?")
+        mode = p.get("storage_mode", "summary" if chunks in ("?", 1, 2) else "full_text")
+        print(f"[{p.get('score', '?')}/10] {p.get('title', 'untitled')}  [{mode}, {chunks} chunks]")
         print(f"  {p.get('source', 'no source')}  ·  {p.get('date_added', 'N/A')[:10]}")
         print()
 
@@ -501,13 +397,6 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
 
-    # auth
-    p_auth = sub.add_parser("auth", help="Manage authentication")
-    auth_sub = p_auth.add_subparsers(dest="auth_command", metavar="<subcommand>")
-    auth_sub.required = True
-    auth_sub.add_parser("login", help="Browser OAuth PKCE login with claude.ai")
-    auth_sub.add_parser("status", help="Show active auth method")
-
     # add
     p_add = sub.add_parser("add", help="Add a paper (arXiv URL) or local PDF")
     p_add.add_argument("input", help="arXiv URL or local PDF path")
@@ -530,7 +419,7 @@ def main() -> None:
     # add-digest
     p_adig = sub.add_parser("add-digest", help="Import papers from digest Markdown file(s)")
     p_adig.add_argument("path", help="Digest .md file or directory of digest files")
-    p_adig.add_argument("--min-score", type=int, default=0, dest="min_score",
+    p_adig.add_argument("--min-score", type=int, default=9, dest="min_score",
                         help="Only import papers with score >= N (default: 0)")
 
     # list / stats / remove / clear
@@ -554,7 +443,6 @@ def main() -> None:
 
     args = parser.parse_args()
     dispatch = {
-        "auth":          lambda: (cmd_auth_login() if args.auth_command == "login" else cmd_auth_status()),
         "add":           lambda: cmd_add(args),
         "add-digest":    lambda: cmd_add_digest(args),
         "list":          lambda: cmd_list(args),

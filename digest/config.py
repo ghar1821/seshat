@@ -27,9 +27,7 @@ Example ~/.seshat/config.toml:
     vault_path = "~/vault"
 
     [auth]
-    oauth_client_id = ""
-    oauth_auth_url = "https://claude.ai/oauth/authorize"
-    oauth_token_url = "https://api.anthropic.com/oauth/token"
+    api_key = "sk-ant-..."    # Anthropic API key (alternative to ANTHROPIC_API_KEY env var)
 """
 
 import os
@@ -71,10 +69,7 @@ class Config:
     private_vault_dirs: list[str] = field(default_factory=lambda: ["private"])
 
     # ── Auth ──────────────────────────────────────────────────────────────────
-    auth_file: Path = field(default_factory=lambda: Path("~/.seshat/auth.json").expanduser())
-    oauth_client_id: str = ""
-    oauth_auth_url: str = "https://claude.ai/oauth/authorize"
-    oauth_token_url: str = "https://api.anthropic.com/oauth/token"
+    anthropic_api_key: str = ""
 
 
 def load_config(config_file: Path = CONFIG_FILE) -> Config:
@@ -116,12 +111,8 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
             cfg.private_vault_dirs = [str(d) for d in c["private_vault_dirs"]]
 
         a = data.get("auth", {})
-        if "oauth_client_id" in a:
-            cfg.oauth_client_id = str(a["oauth_client_id"])
-        if "oauth_auth_url" in a:
-            cfg.oauth_auth_url = str(a["oauth_auth_url"])
-        if "oauth_token_url" in a:
-            cfg.oauth_token_url = str(a["oauth_token_url"])
+        if "api_key" in a:
+            cfg.anthropic_api_key = str(a["api_key"])
 
     # Env var overrides (always win over TOML)
     if v := os.environ.get("OLLAMA_MODEL"):
@@ -132,12 +123,6 @@ def load_config(config_file: Path = CONFIG_FILE) -> Config:
         cfg.provider = v
     if v := os.environ.get("VAULT_PATH"):
         cfg.vault_path = Path(v).expanduser()
-    if v := os.environ.get("ANTHROPIC_OAUTH_CLIENT_ID"):
-        cfg.oauth_client_id = v
-    if v := os.environ.get("ANTHROPIC_OAUTH_AUTH_URL"):
-        cfg.oauth_auth_url = v
-    if v := os.environ.get("ANTHROPIC_OAUTH_TOKEN_URL"):
-        cfg.oauth_token_url = v
 
     return cfg
 

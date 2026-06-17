@@ -4,7 +4,31 @@ Prototype stage — no deployments. Changes documented for development reference
 
 ---
 
-## [current] — project rename to seshat
+## [current] — fixes, auth cleanup, and kb list improvements
+
+### Added
+- `storage_mode` metadata field (`"summary"` or `"full_text"`) stored on every indexed chunk
+- `kb list` now shows chunk count and storage mode per entry — chunk count is ground truth for verifying full-text vs summary storage
+- `kb list` now includes local PDFs (`doc_type: "pdf"`) alongside arXiv papers
+- `kb clear` and `kb add` commands added to README
+- `[build-system]` table added to `pyproject.toml` — `uv sync` now installs entry points without needing `uv pip install -e .`
+
+### Fixed
+- `--full-text` for local PDFs was always falling through to summary mode — now correctly converts and chunks the PDF
+- `kb add --full-text` no longer instantiates the LLM provider when no summary is needed
+- `paper_summary.md` prompt path in `llm.py` was wrong after subpackage restructure (`digest/prompts/` → `digest/kb/prompts/`)
+- `kb auth` subcommand and all OAuth PKCE code removed — Anthropic banned third-party subscription OAuth in early 2026
+- `oauth_client_id` removed from `~/.seshat/config.toml`
+
+### Changed
+- Anthropic API key can now be stored in `~/.seshat/config.toml` under `[auth] api_key` as an alternative to the `ANTHROPIC_API_KEY` env var
+- `kb add-digest` default `--min-score` changed from `0` to `9`
+- `add_paper()` in `store.py` accepts `storage_mode` parameter
+- README: setup simplified to `uv sync` only; OAuth auth section replaced with config file option
+
+---
+
+## [previous] — project rename to seshat
 
 ### Renamed
 - GitHub repository: `ghar1821/paper_digest` → `ghar1821/seshat`

@@ -74,7 +74,7 @@ def _get_summary_prompt() -> str:
     global _SUMMARY_PROMPT
     if _SUMMARY_PROMPT is None:
         _SUMMARY_PROMPT = (
-            Path(__file__).parent / "prompts" / "paper_summary.md"
+            Path(__file__).parent / "kb" / "prompts" / "paper_summary.md"
         ).read_text()
     return _SUMMARY_PROMPT
 
@@ -171,9 +171,8 @@ def _block_to_dict(block) -> dict:
 
 
 class AnthropicProvider:
-    def __init__(self, model: str, auth_file: Path | None = None) -> None:
+    def __init__(self, model: str) -> None:
         self.model = model
-        self._auth_file = auth_file or Path.home() / ".seshat" / "auth.json"
         self._client = None
 
     def _get_client(self):
@@ -184,65 +183,16 @@ class AnthropicProvider:
 
         import anthropic
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        from .config import get_config
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or get_config().anthropic_api_key
         if api_key:
             self._client = anthropic.Anthropic(api_key=api_key)
             return self._client
 
-        if self._auth_file.exists():
-            auth = json.loads(self._auth_file.read_text())
-            token = auth.get("access_token", "")
-            expires_at = auth.get("expires_at", "")
-            if expires_at:
-                from datetime import datetime, timezone
-
-                try:
-                    if datetime.now(timezone.utc) > datetime.fromisoformat(expires_at):
-                        token = self._refresh_token(auth)
-                except ValueError:
-                    pass
-            if token:
-                self._client = anthropic.Anthropic(auth_token=token)
-                return self._client
-
         raise AuthenticationError(
             "No Anthropic credentials found.\n"
-            "  Option 1: export ANTHROPIC_API_KEY=sk-ant-...\n"
-            "  Option 2: paper-rag auth login"
+            "  Set ANTHROPIC_API_KEY env var or add api_key to [auth] in ~/.seshat/config.toml"
         )
-
-    def _refresh_token(self, auth: dict) -> str:
-        import os
-
-        import requests
-
-        from .config import get_config
-
-        cfg = get_config()
-        resp = requests.post(
-            cfg.oauth_token_url,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": auth.get("refresh_token", ""),
-                "client_id": cfg.oauth_client_id or os.environ.get("ANTHROPIC_OAUTH_CLIENT_ID", ""),
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        token_data = resp.json()
-
-        from datetime import datetime, timezone
-
-        expires_in = token_data.get("expires_in", 3600)
-        auth["access_token"] = token_data["access_token"]
-        auth["expires_at"] = datetime.fromtimestamp(
-            datetime.now(timezone.utc).timestamp() + expires_in, tz=timezone.utc
-        ).isoformat()
-        if token_data.get("refresh_token"):
-            auth["refresh_token"] = token_data["refresh_token"]
-        self._auth_file.write_text(json.dumps(auth, indent=2))
-        return token_data["access_token"]
 
     def complete(
         self,
@@ -355,7 +305,7 @@ def make_provider(
     cfg = get_config()
 
     if spec == "anthropic":
-        return AnthropicProvider(model=model or cfg.anthropic_model, auth_file=cfg.auth_file)
+        return AnthropicProvider(model=model or cfg.anthropic_model)
 
     # "ollama" or a bare model name
     ollama_model = model or (cfg.ollama_model if spec == "ollama" else spec)
