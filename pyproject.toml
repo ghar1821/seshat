@@ -15,6 +15,10 @@ dependencies = [
     "langchain-text-splitters>=0.3.0",
 ]
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["digest*", "vault_chat*"]
 

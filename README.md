@@ -59,7 +59,6 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture documentation.
 
 ```bash
 uv sync
-uv pip install -e .
 ```
 
 Requires [Ollama](https://ollama.com) running locally with the configured model pulled (default: `gemma4:26b`).
