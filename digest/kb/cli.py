@@ -12,8 +12,7 @@ Subcommands:
   remove <source>   Remove a document by source URL
   clear             Delete all documents (prompts for confirmation)
 
-  index-vault       Full (re)index of Obsidian vault
-  refresh-vault     Incremental update of vault index
+  index-vault       Incrementally update vault index; --force clears first
 
 Usage examples:
   uv run kb add https://arxiv.org/abs/2406.04093 --score 9 --track "Track 1"
@@ -23,7 +22,7 @@ Usage examples:
   uv run kb stats
   uv run kb remove https://arxiv.org/abs/2301.07041
   uv run kb index-vault
-  uv run kb refresh-vault
+  uv run kb index-vault --force
 """
 
 import argparse
@@ -382,11 +381,17 @@ def cmd_index_vault(args: argparse.Namespace) -> None:
         print("Clearing existing vault index...", flush=True)
         try:
             result = store._collection.get(
-                where={"doc_type": {"$eq": "note"}}, include=[]
+                where={"doc_type": {"$eq": "note"}}, include=["metadatas"]
             )
-            if result["ids"]:
-                store.delete(result["ids"])
-                print(f"  Cleared {len(result['ids'])} chunks", flush=True)
+            # Only delete vault .md notes (relative paths).
+            # PDF notes (absolute paths ending in .pdf) are left untouched.
+            ids_to_delete = [
+                id_ for id_, meta in zip(result["ids"], result["metadatas"])
+                if not meta.get("file_path", "").endswith(".pdf")
+            ]
+            if ids_to_delete:
+                store.delete(ids_to_delete)
+                print(f"  Cleared {len(ids_to_delete)} chunks", flush=True)
         except Exception:
             pass
 
@@ -406,23 +411,6 @@ def cmd_update_path(args: argparse.Namespace) -> None:
         print(f"No documents found with source: {args.source}")
     else:
         print(f"Updated {n} chunk(s) — new path: {new_path}")
-
-
-def cmd_refresh_vault(args: argparse.Namespace) -> None:
-    from ..config import get_config
-    from .store import get_store, refresh_vault
-
-    cfg = get_config()
-    vault = Path(args.vault_path).expanduser() if args.vault_path else cfg.vault_path
-    if not vault.exists():
-        print(f"Error: vault path does not exist: {vault}", file=sys.stderr)
-        sys.exit(1)
-
-    added, updated, deleted = refresh_vault(vault, get_store())
-    if added + updated + deleted == 0:
-        print("Vault index is up to date.")
-    else:
-        print(f"Vault refreshed — +{added} new, ~{updated} changed, -{deleted} removed")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -485,24 +473,21 @@ def main() -> None:
     p_upd.add_argument("source", help="Current source URL of the document (file:/// URI or arXiv URL)")
     p_upd.add_argument("new_path", help="New filesystem path to the file")
 
-    # index-vault / refresh-vault
+    # index-vault
     p_idx = sub.add_parser("index-vault", help="(Re)index the Obsidian vault")
     p_idx.add_argument("--vault-path", default="")
-    p_idx.add_argument("--force", action="store_true", help="Clear existing vault index first")
-    p_ref = sub.add_parser("refresh-vault", help="Incrementally update vault index")
-    p_ref.add_argument("--vault-path", default="")
+    p_idx.add_argument("--force", action="store_true", help="Clear existing vault .md index first (preserves PDF notes)")
 
     args = parser.parse_args()
     dispatch = {
-        "add":           lambda: cmd_add(args),
-        "add-digest":    lambda: cmd_add_digest(args),
-        "list":          lambda: cmd_list(args),
-        "stats":         cmd_stats,
-        "remove":        lambda: cmd_remove(args),
-        "clear":         lambda: cmd_clear(args),
-        "update-path":   lambda: cmd_update_path(args),
-        "index-vault":   lambda: cmd_index_vault(args),
-        "refresh-vault": lambda: cmd_refresh_vault(args),
+        "add":         lambda: cmd_add(args),
+        "add-digest":  lambda: cmd_add_digest(args),
+        "list":        lambda: cmd_list(args),
+        "stats":       cmd_stats,
+        "remove":      lambda: cmd_remove(args),
+        "clear":       lambda: cmd_clear(args),
+        "update-path": lambda: cmd_update_path(args),
+        "index-vault": lambda: cmd_index_vault(args),
     }
     dispatch[args.command]()
 

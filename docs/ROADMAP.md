@@ -2,35 +2,11 @@
 
 ---
 
-## Web chat UI (Streamlit)
+## ~~Web chat UI~~ ✓ implemented
 
-Replace the terminal `vault-chat` loop with a Streamlit web app served on `localhost:8501`. The core agentic logic stays unchanged; the UI is a thin wrapper.
+`webapp/` — FastAPI + SSE + vanilla JS. Launch with `uv run webapp` (`http://127.0.0.1:8080`).
 
-### Tool call transparency
-
-Currently `agentic_turn()` prints tool calls directly to the terminal. To support both contexts without duplicating logic, replace the hardwired `print()` with an optional callback:
-
-```python
-def agentic_turn(..., on_tool_call=None):
-    # called after each tool execution
-    if on_tool_call:
-        on_tool_call(name, args, result)
-    else:
-        print(f"→ {name}({args})")
-```
-
-- Terminal mode: pass nothing — existing behaviour preserved.
-- Streamlit mode: pass a function that writes to `st.status()`, which renders as a collapsible box with a spinner while running and a summary when done.
-
-This is a small change to `digest/llm.py` and a one-liner at each call site in `vault_chat/chat.py`.
-
-### Session state
-
-`agentic_turn()` already takes a `messages` list and mutates it in place. That maps directly onto `st.session_state.messages` — no restructuring needed.
-
-### Rough implementation size
-
-~100 lines for the Streamlit app, ~20 lines of changes to existing files for the callback abstraction.
+Tool calls appear live in a collapsible `<details>` box while the agent is working and collapse when the reply arrives. Conversation history survives page refresh. Localhost only.
 
 ---
 

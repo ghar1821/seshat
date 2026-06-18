@@ -4,7 +4,59 @@ Prototype stage — no deployments. Changes documented for development reference
 
 ---
 
-## [current] — test suite
+## [current] — privacy hard stop (PrivacyError); web UI rebuild (FastAPI + SSE); refresh_vault bug fix
+
+### Added
+- `PrivacyError(PaperDigestError)` in `digest/errors.py` — raised (not returned as a string) when a cloud provider attempts to access private content
+- `PrivacyError` hard stop in both `OllamaProvider.agentic_turn()` and `AnthropicProvider.agentic_turn()`: catches `PrivacyError` from `dispatch_fn`, removes the orphaned assistant message so conversation history stays valid, and returns the error string immediately — no further LLM calls are made
+- `webapp/app.py` — FastAPI web UI served at `http://127.0.0.1:8080`; launch with `uv run webapp`
+- `webapp/index.html` — single self-contained HTML page; inline CSS and vanilla JS; no external dependencies
+- Tool calls rendered live in an open `<details>` box while the agent is working; collapses when the reply arrives; history shown as collapsed `<details>` on re-render
+- Conversation history survives browser refresh (restored from server-side in-memory display list via `/history`)
+- `fastapi>=0.100.0` and `uvicorn>=0.20.0` added to project dependencies
+- `webapp` entry point added to `pyproject.toml`
+- `webapp --provider <ollama|anthropic>` CLI flag — overrides config and `CHAT_PROVIDER` env var for that server session
+
+### Removed (prior to this rebuild)
+- Streamlit web UI — Streamlit collects telemetry that cannot be reliably disabled, which conflicts with this project's privacy requirements
+- `on_tool_call` callback parameter from `_dispatch_tool()` — was Streamlit-specific dead code; the FastAPI UI uses a `dispatch_fn` wrapper instead
+
+### Fixed
+- `refresh_vault` Phase 1 was including PDF notes (absolute `file_path` values ending in `.pdf`) in the `indexed` dict alongside vault `.md` notes (relative paths). The deletion sweep compared against `current` (relative `.md` paths only), so every PDF note's absolute path was "not found" and silently deleted on every `refresh_vault` call.
+- `index-vault --force` was deleting all notes including PDF notes. Now it only clears vault `.md` chunks; PDF notes are preserved.
+
+### Removed
+- `kb refresh-vault` CLI subcommand — redundant with `kb index-vault` (which calls `refresh_vault()` internally). `kb index-vault` is incremental by default; use `--force` to clear and rebuild.
+- `refresh_vault` tool from vault-chat agent — replaced by `index_vault` which covers both the incremental and force-rebuild cases.
+
+### Changed
+- `index_vault` tool description updated to reflect that it handles both incremental and forced rebuilds.
+
+### Changed
+- `_search_notes` and `_retrieve_papers` in `vault_chat/chat.py` now raise `PrivacyError` instead of returning a warning string when the query matches only private content. Mixed results (public + private) return the public results silently — the LLM is not told private content exists.
+- `read_file` in `vault_chat/chat.py` now raises `PrivacyError` instead of returning a warning string when a cloud provider attempts to read a file inside a `private_vault_dirs` folder.
+- `_privacy_warning` helper removed — no longer needed.
+
+### Tests
+- Added `test_refresh_vault_preserves_pdf_notes` to `tests/test_store.py` as a regression test for the Phase 1 deletion bug.
+
+---
+
+## [previous] — Streamlit web UI
+
+### Added
+- `webapp/app.py` — Streamlit chat UI served at `localhost:8501`; launch with `uv run streamlit run webapp/app.py`
+- Tool calls rendered live in a collapsible `st.status()` box while the LLM is working; collapses to a summary when done; historical tool calls shown in `st.expander()` on re-render
+- Sidebar shows active provider and vault path
+- Vault auto-refreshed once per browser session on startup
+- `streamlit>=1.40.0` added to project dependencies
+
+### Changed
+- `_dispatch_tool()` in `vault_chat/chat.py` accepts an optional `on_tool_call` callback — when provided, calls it instead of printing; terminal `vault-chat` behaviour is unchanged (no callback passed)
+
+---
+
+## [previous] — test suite
 
 ### Added
 - `tests/` directory with pytest-based unit and integration test suite

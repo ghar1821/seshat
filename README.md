@@ -20,11 +20,12 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture documentation.
 - Indexes your Obsidian vault notes alongside papers in a single local vector store (runs entirely on your machine)
 - Privacy model: vault folders marked private are accessible to the local model only — never sent to cloud APIs
 
-**Conversational agent (`vault-chat`)**
+**Conversational agent (`vault-chat` and web UI)**
 - Query your knowledge base in natural language
 - Add papers by arXiv URL or local PDF mid-conversation
 - Remove entries, trigger vault re-indexing, and check stats through the same chat interface
 - Runs against a local Ollama model or Anthropic Claude (switchable per session)
+- Terminal interface (`vault-chat`) or browser interface (`webapp`, localhost only)
 
 ---
 
@@ -44,6 +45,9 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for architecture documentation.
 │       └── prompts/paper_summary.md
 ├── vault_chat/
 │   └── chat.py                         # Conversational KB agent
+├── webapp/
+│   ├── app.py, run.py                  # FastAPI web UI (localhost:8080)
+│   └── index.html                      # Single-page chat UI
 ├── docs/
 │   ├── DESIGN.md
 │   ├── CHANGELOG.md
@@ -84,7 +88,7 @@ vault_path = "~/Documents/obsidian"
 private_vault_dirs = ["private"] # vault subdirs only accessible to local model
 
 [auth]
-oauth_client_id = ""             # required for kb auth login
+api_key = ""                     # Anthropic API key (alternative to ANTHROPIC_API_KEY env var)
 ```
 
 Env var overrides: `OLLAMA_MODEL`, `ANTHROPIC_MODEL`, `CHAT_PROVIDER`, `VAULT_PATH`.
@@ -112,13 +116,21 @@ All commands require the `uv run` prefix (entry points live in `.venv/bin/`). Al
 
 ### Vault chat — conversational KB agent
 
-The primary way to interact with the knowledge base.
-
 ```bash
 uv run vault-chat                           # uses provider from config
 uv run vault-chat ~/path/to/vault           # override vault path
 CHAT_PROVIDER=anthropic uv run vault-chat   # use Anthropic for this session
 ```
+
+### Web UI
+
+```bash
+uv run webapp                          # uses provider from config
+uv run webapp --provider anthropic     # override provider for this session
+uv run webapp --provider ollama
+```
+
+Same agent as `vault-chat`. Tool calls appear live in a collapsible box while the agent is working. Localhost only — not accessible from other machines.
 
 Available tools the agent can call:
 
@@ -131,8 +143,8 @@ Available tools the agent can call:
 | `remove_document` | Two-step remove: preview then confirm; optionally deletes the local file |
 | `list_papers` | List all indexed papers |
 | `kb_stats` | Paper, note, and chunk counts |
-| `index_vault` | Build or rebuild the vault index |
-| `refresh_vault` | Incremental vault sync (new/changed/deleted files) |
+| `update_file_path` | Update stored path for a moved or renamed local file |
+| `index_vault` | Incremental vault sync; `force=true` clears vault `.md` index first (PDF notes preserved) |
 
 Example interactions:
 
@@ -160,10 +172,9 @@ When adding a paper the agent uses `summary` mode by default. Specify `full text
 For scripted use, batch imports, and initial setup.
 
 ```bash
-# Vault indexing
+# Vault indexing (incremental by default; --force clears vault .md index first)
 uv run kb index-vault
-uv run kb index-vault --vault-path ~/path/to/vault --force   # clear and rebuild
-uv run kb refresh-vault
+uv run kb index-vault --vault-path ~/path/to/vault --force
 
 # Add a paper by arXiv URL
 uv run kb add https://arxiv.org/abs/2406.04093
@@ -238,4 +249,5 @@ See [docs/LAUNCHD_SETUP.md](docs/LAUNCHD_SETUP.md). The digest runs weekly (Mond
 - [uv](https://github.com/astral-sh/uv)
 - Python ≥ 3.12
 - [Ollama](https://ollama.com) with the configured model pulled (for local inference)
-- Anthropic API key or OAuth client ID (for cloud inference only)
+- Anthropic API key (for cloud inference only; set via env var or `~/.seshat/config.toml`)
+- `fastapi` and `uvicorn` (included in `uv sync`; required for the web UI only)

@@ -8,7 +8,9 @@ so the user can see every step.
 
 Provider (set via CHAT_PROVIDER env var or config):
   ollama     — local Ollama, full access (public + private documents)
-  anthropic  — Anthropic Claude, public documents only; warns on private hits
+  anthropic  — Anthropic Claude, public documents only; raises PrivacyError on any
+               private content hit, which terminates the tool loop immediately
+               (prompt-injection defence — private content never reaches the model)
 
 Auth for Anthropic:
   Option 1: export ANTHROPIC_API_KEY=sk-ant-...
@@ -19,7 +21,7 @@ import sys
 from pathlib import Path
 
 from digest.config import get_config
-from digest.errors import LLMError
+from digest.errors import LLMError, PrivacyError
 from digest.llm import make_provider
 
 # ── Tool definitions ───────────────────────────────────────────────────────────
@@ -191,17 +193,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "refresh_vault",
-            "description": (
-                "Incrementally update the vault index — adds new notes, re-indexes changed ones, "
-                "removes deleted ones. Use this for routine updates after editing notes."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "update_file_path",
             "description": (
                 "Update the stored file path for a local document (PDF or vault note) "
@@ -265,8 +256,7 @@ Ask the user whether they want summary or full_text mode if not specified. Narra
 - To remove a document: call remove_document without confirmed first to preview, \
 then confirm with the user before calling with confirmed=true.
 - To inspect the knowledge base: use list_papers or kb_stats.
-- To index the vault for the first time or force a rebuild: call index_vault.
-- To pick up recent vault changes: call refresh_vault.
+- To index or update the vault: call index_vault (incremental by default; force=true for a clean rebuild).
 - To update the path of a moved or renamed local file: call update_file_path with the old source URL and the new path. Use list_papers or search_notes to find the source URL first.
 
 Always include the source URL when discussing a paper.\
@@ -301,23 +291,16 @@ def read_file(vault: Path, rel_path: str, provider_str: str = "ollama") -> str:
     if provider_str == "anthropic":
         cfg = get_config()
         if Path(rel_path).parts and Path(rel_path).parts[0] in cfg.private_vault_dirs:
-            return (
-                f"⚠️  '{rel_path}' is private and cannot be read by a cloud provider. "
-                f"Switch to Ollama to access this file."
+            # Hard stop — do not return the path or any hint about content;
+            # private notes may contain adversarial text designed to manipulate the model.
+            raise PrivacyError(
+                f"'{rel_path}' is in a private vault directory and cannot be read by a "
+                "cloud provider. Switch to Ollama to access private notes."
             )
     return target.read_text(encoding="utf-8")
 
 
 # ── Tool implementations ───────────────────────────────────────────────────────
-
-
-def _privacy_warning(has_private: bool) -> str:
-    if not has_private:
-        return ""
-    return (
-        "\n⚠️  Some relevant private documents were excluded (cloud provider active). "
-        "Switch to Ollama to access them.\n"
-    )
 
 
 def _retrieve_papers(args: dict, provider_str: str) -> str:
@@ -331,20 +314,26 @@ def _retrieve_papers(args: dict, provider_str: str) -> str:
             doc_type="paper",
             store=get_store(),
         )
-        warning = _privacy_warning(has_private)
-        if not results:
-            return f"[No papers found.{warning}]"
-        lines = [f"Found {len(results)} paper(s):{warning}\n"]
-        for i, doc in enumerate(results, 1):
-            m = doc.metadata
-            lines.append(
-                f"{i}. [{m.get('score', '?')}/10 · {m.get('track', '')}] {m.get('title', 'untitled')}\n"
-                f"   {m.get('source', '')}\n"
-                f"   {doc.page_content[:300].replace(chr(10), ' ')}...\n"
-            )
-        return "\n".join(lines)
     except Exception as exc:
         return f"[retrieve_papers error: {exc}]"
+
+    # Query matched private content only — hard stop to prevent further probing.
+    if has_private and not results:
+        raise PrivacyError(
+            "This query matched papers that are private and cannot be accessed by a "
+            "cloud provider. Switch to Ollama to access private documents."
+        )
+    if not results:
+        return "[No papers found.]"
+    lines = [f"Found {len(results)} paper(s):\n"]
+    for i, doc in enumerate(results, 1):
+        m = doc.metadata
+        lines.append(
+            f"{i}. [{m.get('score', '?')}/10 · {m.get('track', '')}] {m.get('title', 'untitled')}\n"
+            f"   {m.get('source', '')}\n"
+            f"   {doc.page_content[:300].replace(chr(10), ' ')}...\n"
+        )
+    return "\n".join(lines)
 
 
 def _search_notes(args: dict, provider_str: str) -> str:
@@ -358,19 +347,25 @@ def _search_notes(args: dict, provider_str: str) -> str:
             doc_type="note",
             store=get_store(),
         )
-        warning = _privacy_warning(has_private)
-        if not results:
-            return f"[No notes found. Run 'kb index-vault' if vault is not yet indexed.{warning}]"
-        lines = [f"Found {len(results)} note chunk(s):{warning}\n"]
-        for i, doc in enumerate(results, 1):
-            m = doc.metadata
-            lines.append(
-                f"{i}. {m.get('title', 'untitled')}  ({m.get('file_path', 'unknown')})\n"
-                f"   {doc.page_content[:300].replace(chr(10), ' ')}...\n"
-            )
-        return "\n".join(lines)
     except Exception as exc:
         return f"[search_notes error: {exc}]"
+
+    # Query matched private notes only — hard stop to prevent further probing.
+    if has_private and not results:
+        raise PrivacyError(
+            "This query matched notes that are private and cannot be accessed by a "
+            "cloud provider. Switch to Ollama to access private notes."
+        )
+    if not results:
+        return "[No notes found. Run 'kb index-vault' if vault is not yet indexed.]"
+    lines = [f"Found {len(results)} note chunk(s):\n"]
+    for i, doc in enumerate(results, 1):
+        m = doc.metadata
+        lines.append(
+            f"{i}. {m.get('title', 'untitled')}  ({m.get('file_path', 'unknown')})\n"
+            f"   {doc.page_content[:300].replace(chr(10), ' ')}...\n"
+        )
+    return "\n".join(lines)
 
 
 def _add_document(args: dict, provider_obj) -> str:
@@ -644,18 +639,6 @@ def _update_file_path(args: dict) -> str:
         return f"[update_file_path error: {exc}]"
 
 
-def _refresh_vault_tool(vault: Path) -> str:
-    try:
-        from digest.kb.store import get_store, refresh_vault
-
-        added, updated, deleted = refresh_vault(vault, get_store())
-        if added + updated + deleted == 0:
-            return "Vault index is up to date."
-        return f"Vault refreshed: +{added} new, ~{updated} changed, -{deleted} removed"
-    except Exception as exc:
-        return f"[refresh_vault error: {exc}]"
-
-
 def _index_vault_tool(vault: Path, force: bool = False) -> str:
     try:
         from digest.kb.store import get_store, refresh_vault
@@ -665,11 +648,17 @@ def _index_vault_tool(vault: Path, force: bool = False) -> str:
             print("  Clearing existing vault index...", flush=True)
             try:
                 result = store._collection.get(
-                    where={"doc_type": {"$eq": "note"}}, include=[]
+                    where={"doc_type": {"$eq": "note"}}, include=["metadatas"]
                 )
-                if result["ids"]:
-                    store.delete(result["ids"])
-                    print(f"  Cleared {len(result['ids'])} chunks", flush=True)
+                # Only delete vault .md notes (relative paths).
+                # PDF notes (absolute paths ending in .pdf) are left untouched.
+                ids_to_delete = [
+                    id_ for id_, meta in zip(result["ids"], result["metadatas"])
+                    if not meta.get("file_path", "").endswith(".pdf")
+                ]
+                if ids_to_delete:
+                    store.delete(ids_to_delete)
+                    print(f"  Cleared {len(ids_to_delete)} chunks", flush=True)
             except Exception:
                 pass
 
@@ -687,7 +676,6 @@ def _dispatch_tool(
     provider_str: str,
     provider_obj,
 ) -> str:
-    # Print the tool call so the user can see what the LLM is doing
     arg_summary = ", ".join(f"{k}={repr(v)[:40]}" for k, v in arguments.items())
     print(f"  → {name}({arg_summary})", flush=True)
 
@@ -707,8 +695,6 @@ def _dispatch_tool(
         return _kb_stats()
     if name == "update_file_path":
         return _update_file_path(arguments)
-    if name == "refresh_vault":
-        return _refresh_vault_tool(vault)
     if name == "index_vault":
         return _index_vault_tool(vault, bool(arguments.get("force", False)))
     return f"[Error: unknown tool '{name}']"

@@ -74,7 +74,7 @@ connectivity and credentials.
 | `test_config.py` | `digest/config.py` | Defaults when no TOML; TOML overrides defaults; env vars override TOML; `~` in paths expanded; `[auth] api_key` loaded |
 | `test_errors.py` | `digest/errors.py` | `@with_retries`: success on first try; retry on matching exception; raise after max attempts; no retry on non-matching exception |
 | `test_arxiv_convert.py` | `digest/arxiv/convert.py` | `parse_arxiv_url()`: `/abs/` URL; `/pdf/` URL; version suffix preserved; non-arXiv URL returns None |
-| `test_store.py` | `digest/kb/store.py` | `add_texts` count; `add_paper` idempotency; visibility filter; privacy check (cloud and local); `delete_by_metadata`; `list_papers` deduplication and chunk count; `update_file_path` metadata and URI; `update_file_path` unknown source; `refresh_vault` add / update / delete |
+| `test_store.py` | `digest/kb/store.py` | `add_texts` count; `add_paper` idempotency; visibility filter; privacy check (cloud and local); `delete_by_metadata`; `list_papers` deduplication and chunk count; `update_file_path` metadata and URI; `update_file_path` unknown source; `refresh_vault` add / update / delete / PDF notes preserved |
 | `test_llm.py` *(integration)* | `digest/llm.py` | Anthropic client initialisation; models list API call; Ollama server reachability |
 
 ## What is not tested
@@ -85,3 +85,4 @@ connectivity and credentials.
 | `digest/arxiv/fetch.py` | Same — live arXiv API |
 | `digest/pipeline/` | Depends on LLM responses; correctness is validated by running the pipeline |
 | `vault_chat/chat.py` | The agentic loop is integration-level; all KB behaviour it relies on is covered by `test_store.py` |
+| `webapp/` | The web UI is integration-level (requires a live browser, server, and LLM); the FastAPI routes and SSE stream are thin wrappers over `vault_chat/chat.py` which is already covered |

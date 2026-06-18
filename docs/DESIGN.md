@@ -39,6 +39,19 @@ A personal research tool that:
 ├── vault_chat/
 │   └── chat.py                      # `vault-chat` entry point (KB agent)
 │
+├── webapp/
+│   ├── app.py                       # FastAPI application (routes, SSE stream, session state)
+│   ├── index.html                   # Single-page chat UI (inline CSS + vanilla JS)
+│   └── run.py                       # `webapp` entry point (uvicorn launcher)
+│
+├── tests/
+│   ├── conftest.py                  # Shared fixtures (embeddings, isolated store)
+│   ├── test_config.py
+│   ├── test_errors.py
+│   ├── test_arxiv_convert.py
+│   ├── test_store.py
+│   └── test_llm.py                  # integration — requires live services
+│
 ├── docs/
 │   ├── DESIGN.md                    # This file
 │   └── CHANGELOG.md
@@ -54,6 +67,7 @@ A personal research tool that:
 | `digest/pipeline/` | Weekly automated digest: scoring, formatting, orchestration |
 | `digest/kb/` | Knowledge base: vector store operations and the `kb` CLI |
 | `vault_chat/chat.py` | Conversational agent: query and manage via natural language |
+| `webapp/` | Browser-based chat UI: FastAPI routes, SSE stream, session state, HTML frontend |
 | `digest/llm.py` | Shared: LLM provider abstraction (Ollama + Anthropic) |
 | `digest/config.py` | Shared: central configuration |
 | `digest/errors.py` | Shared: domain exceptions and retry decorator |
@@ -73,6 +87,8 @@ A personal research tool that:
 | `ollama` | Local Ollama LLM client |
 | `marker-pdf` | High-quality PDF-to-Markdown conversion for scientific papers |
 | `requests` | HTTP client (arXiv API) |
+| `fastapi` | Web framework for the browser UI (`webapp/`) |
+| `uvicorn` | ASGI server that runs the FastAPI app |
 
 ---
 
@@ -86,6 +102,7 @@ All require `uv run` prefix unless the venv is activated (`source .venv/bin/acti
 | `uv run vault-chat` | `vault_chat.chat:main` | Start the KB agent chat session |
 | `uv run kb` | `digest.kb.cli:main` | Manage the knowledge base (CLI) |
 | `uv run convert-pdf` | `digest.arxiv.convert:main` | Convert a PDF to Markdown (standalone) |
+| `uv run webapp` | `webapp.run:main` | Start the web UI at `http://127.0.0.1:8080` |
 
 ---
 
@@ -158,7 +175,9 @@ metadata:
 | | Ollama (local) | Anthropic (cloud) |
 |---|---|---|
 | `"public"` | ✓ | ✓ |
-| `"private"` | ✓ | Excluded; warning shown |
+| `"private"` | ✓ | Raises `PrivacyError`; tool loop terminates immediately |
+
+When a cloud provider query matches only private content, or tries to read a file in a private vault directory, `PrivacyError` is raised from the tool implementation. `agentic_turn()` catches it, removes the orphaned assistant message from `messages` to keep conversation history valid, and returns the error string directly to the user — no further LLM calls are made. This is a prompt-injection defence: private notes may contain adversarial content that must never reach a cloud model.
 
 Files under `private_vault_dirs` folders → `"private"`. All papers → `"public"`.
 
@@ -250,16 +269,15 @@ System prompt loaded from `~/.seshat/system_prompt.md` if present; otherwise the
 
 | Tool | Concern | Cloud provider behaviour |
 |---|---|---|
-| `retrieve_papers` | Search indexed papers | Public only + warning if private matched |
-| `search_notes` | Search vault notes | Public only + warning if private matched |
-| `read_file` | Read one vault file in full (after search identifies it) | Blocks files in `private_vault_dirs` |
+| `retrieve_papers` | Search indexed papers | Public only; `PrivacyError` if query only matches private content |
+| `search_notes` | Search vault notes | Public only; `PrivacyError` if query only matches private content |
+| `read_file` | Read one vault file in full (after search identifies it) | `PrivacyError` for files in `private_vault_dirs` |
 | `add_document` | Add a paper or PDF; requires `doc_type` for local PDFs; two storage modes (see below) | Any |
 | `update_file_path` | Update stored path for a local document without re-embedding | Any |
 | `remove_document` | Two-step remove: preview → confirm; optionally delete local file | Any |
 | `list_papers` | List indexed papers | Any |
 | `kb_stats` | Document and chunk counts | Any |
-| `refresh_vault` | Incremental vault sync (new/changed/deleted files) | Any |
-| `index_vault` | Build or rebuild vault index; `force=true` clears first | Any |
+| `index_vault` | Incremental vault sync (new/changed/deleted files); `force=true` clears vault `.md` index first while preserving PDF notes | Any |
 
 ### `add_document` storage modes
 
@@ -284,6 +302,31 @@ Passing `confirmed=true` on the first call is explicitly prohibited in the tool 
 
 ---
 
+## Web UI — `webapp/`
+
+Browser-based alternative to `vault-chat`. Runs on `http://127.0.0.1:8080` (localhost only).
+
+**Stack:** FastAPI + Server-Sent Events + vanilla JS. No npm, no build step, no external JS dependencies. The entire frontend is `webapp/index.html` — a single file with inline CSS and JS that any developer can read in one sitting.
+
+**Session state:** a single in-memory dict shared across browser tabs. Appropriate for a local single-user tool.
+
+**Request flow:**
+
+```
+Browser POST /chat
+  → FastAPI spawns a background thread running provider.agentic_turn()
+  → thread pushes {type: "tool"} events to a queue as each tool fires
+  → async SSE generator drains the queue (50 ms poll) and yields data: lines
+  → thread pushes {type: "reply"} event + sentinel when done
+Browser reads the stream via fetch() + ReadableStream
+  → tool events: appended live to an open <details> box
+  → reply event: <details> collapses; reply bubble appears
+```
+
+**Why fetch + ReadableStream instead of EventSource:** `EventSource` only supports `GET`; sending the message body requires `POST`.
+
+---
+
 ## Error handling — `digest/errors.py`
 
 ```
@@ -291,7 +334,9 @@ PaperDigestError
 ├── FetchError          arXiv API failures
 ├── LLMError            LLM failures
 ├── RAGError            Vector store failures
-└── AuthenticationError Missing credentials
+├── AuthenticationError Missing credentials
+└── PrivacyError        Cloud provider attempted to access private content
+                        (caught by agentic_turn() for an immediate hard stop)
 ```
 
 `@with_retries(max_attempts, backoff, exceptions)` — used in `arxiv/fetch.py` and `pipeline/score.py`.
@@ -318,7 +363,7 @@ User message → provider.agentic_turn() → tool loop → reply
   update_file_path                → update file_path + source URI in all matching chunks; no re-embedding
   remove_document (unconfirmed)   → lookup metadata → return preview
   remove_document (confirmed)     → store.delete() → optionally unlink local file
-  index_vault                     → optionally clear notes → refresh_vault()
-  refresh_vault Phase 1           → compare hashes → index new/changed vault .md, delete removed
+  index_vault                     → optionally clear vault .md chunks (preserving PDF notes) → refresh_vault()
+  refresh_vault Phase 1           → compare hashes → index new/changed vault .md, delete removed (skips PDF notes)
   refresh_vault Phase 2           → check local PDF notes: warn if missing, re-index if hash changed
 ```

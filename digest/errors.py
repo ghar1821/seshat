@@ -27,6 +27,17 @@ class AuthenticationError(PaperDigestError):
     """Missing or invalid credentials for an LLM provider."""
 
 
+class PrivacyError(PaperDigestError):
+    """
+    Raised when a cloud provider attempts to access private content.
+
+    Caught by agentic_turn() to terminate the tool loop immediately —
+    no further LLM calls are made after this is raised. This is a hard
+    prompt-injection defence: private notes may contain adversarial content
+    that must never reach a cloud model, even as a tool result.
+    """
+
+
 def with_retries(
     max_attempts: int = 5,
     backoff: float = 2.0,

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
 
-from .errors import AuthenticationError, LLMError
+from .errors import AuthenticationError, LLMError, PrivacyError
 
 # ── Protocol ───────────────────────────────────────────────────────────────────
 
@@ -144,7 +144,13 @@ class OllamaProvider:
             messages.append(message)
             for tc in message["tool_calls"]:
                 fn = tc["function"]
-                result = dispatch_fn(fn["name"], fn["arguments"])
+                try:
+                    result = dispatch_fn(fn["name"], fn["arguments"])
+                except PrivacyError as exc:
+                    # Remove the assistant message we just added so the
+                    # conversation history stays in a valid state for future turns.
+                    messages.pop()
+                    return str(exc)
                 messages.append({"role": "tool", "content": result})
 
 
@@ -274,7 +280,13 @@ class AnthropicProvider:
                 for block in response.content:
                     if block.type != "tool_use":
                         continue
-                    result = dispatch_fn(block.name, block.input)
+                    try:
+                        result = dispatch_fn(block.name, block.input)
+                    except PrivacyError as exc:
+                        # Remove the assistant message we just added so the
+                        # conversation history stays in a valid state for future turns.
+                        messages.pop()
+                        return str(exc)
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                 messages.append({"role": "user", "content": tool_results})
 

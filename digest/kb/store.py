@@ -417,7 +417,10 @@ def refresh_vault(
         indexed: dict[str, str] = {}
         for meta in result["metadatas"]:
             fp = meta.get("file_path", "")
-            if fp and fp not in indexed:
+            # Skip PDF notes — they have absolute paths and are handled in Phase 2.
+            # Including them here caused them to be incorrectly deleted because
+            # absolute paths never match the relative paths in `current`.
+            if fp and not fp.endswith(".pdf") and fp not in indexed:
                 indexed[fp] = meta.get("content_hash", "")
     except Exception:
         indexed = {}

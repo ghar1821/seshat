@@ -18,7 +18,7 @@ Sections
 4. delete_by_metadata        — chunk removal
 5. list_papers               — deduplication and chunk count
 6. update_file_path          — in-place metadata update
-7. refresh_vault             — incremental vault sync (add / update / delete)
+7. refresh_vault             — incremental vault sync (add / update / delete / PDF notes)
 """
 
 from pathlib import Path
@@ -365,3 +365,56 @@ def test_refresh_vault_removes_deleted_files(tmp_path, store):
     assert added == 0
     assert updated == 0
     assert deleted == 1
+
+
+def test_refresh_vault_preserves_pdf_notes(tmp_path, store):
+    """
+    PDF notes (doc_type="note", file_path is an absolute .pdf path) must NOT
+    be deleted by the vault .md scan in Phase 1 of refresh_vault.
+
+    Before the bug fix, Phase 1 built the `indexed` dict from ALL doc_type="note"
+    entries, including PDF notes whose file_path is an absolute path like
+    "/tmp/.../paper.pdf". The deletion sweep then checked whether each indexed
+    path appeared in `current` (relative .md paths from vault_root.rglob). An
+    absolute path never matched, so every PDF note was silently deleted on every
+    refresh_vault call.
+
+    Input:  a PDF note in the store; a vault directory with no .md files
+    Expected output: refresh_vault returns deleted=0; the PDF note remains present
+    """
+    # Simulate a PDF note as stored by 'kb add --doc-type note'.
+    # The content_hash must match the actual file so Phase 2 skips re-indexing —
+    # we only want to test Phase 1's deletion behaviour here.
+    import hashlib
+    fake_pdf = tmp_path / "paper.pdf"
+    pdf_bytes = b"%PDF fake content"
+    fake_pdf.write_bytes(pdf_bytes)
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    add_texts(
+        content="This is the converted text of a PDF research note.",
+        doc_type="note",
+        visibility="public",
+        source=fake_pdf.as_uri(),
+        extra_metadata={
+            "title": "My PDF Note",
+            "file_path": str(fake_pdf),  # absolute path — this is the trigger for the bug
+            "content_hash": content_hash,
+            "storage_mode": "full_text",
+        },
+        store=store,
+    )
+
+    # Run refresh_vault against an empty vault — nothing on disk, so Phase 1's
+    # `current` dict is empty. The PDF note must survive the deletion sweep.
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+
+    added, updated, deleted = refresh_vault(vault_root=vault_dir, store=store)
+    assert deleted == 0, "Phase 1 must not delete PDF notes — their absolute paths are never in current"
+
+    # Confirm the PDF note is still retrievable from the store
+    result = store._collection.get(
+        where={"doc_type": {"$eq": "note"}}, include=["metadatas"]
+    )
+    stored_paths = [m.get("file_path", "") for m in result["metadatas"]]
+    assert str(fake_pdf) in stored_paths

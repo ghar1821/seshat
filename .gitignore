@@ -14,3 +14,4 @@ output/
 .python-version
 CLAUDE.md
 tests/.chroma/
+docs/ROADMAP.md

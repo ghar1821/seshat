@@ -13,6 +13,8 @@ dependencies = [
     "langchain-chroma>=0.1.0",
     "langchain-huggingface>=0.1.0",
     "langchain-text-splitters>=0.3.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
 ]
 
 [build-system]
@@ -20,13 +22,14 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["digest*", "vault_chat*"]
+include = ["digest*", "vault_chat*", "webapp*"]
 
 [project.scripts]
 run-digest  = "digest.pipeline.run:main"
 convert-pdf = "digest.arxiv.convert:main"
 vault-chat  = "vault_chat.chat:main"
 kb          = "digest.kb.cli:main"
+webapp      = "webapp.run:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
