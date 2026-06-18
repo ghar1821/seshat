@@ -4,7 +4,26 @@ Prototype stage — no deployments. Changes documented for development reference
 
 ---
 
-## [current] — doc_type simplification, PDF notes, update_file_path, auth cleanup
+## [current] — test suite
+
+### Added
+- `tests/` directory with pytest-based unit and integration test suite
+- `tests/conftest.py` — shared fixtures: session-scoped HuggingFace embedding model; per-test isolated ChromaDB collection backed by a persistent local store at `tests/.chroma/`
+- `tests/test_config.py` — `load_config()` resolution order (defaults → TOML → env vars), path expansion, API key loading
+- `tests/test_errors.py` — `@with_retries` behaviour: success, retry on matching exception, raise after max attempts, no retry on unspecified exception
+- `tests/test_arxiv_convert.py` — `parse_arxiv_url()` edge cases: abs URL, pdf URL, version suffix, non-arXiv URL
+- `tests/test_store.py` — full KB operation coverage: `add_texts`, `add_paper` idempotency, visibility filter, `search_with_privacy_check` (cloud and local), `delete_by_metadata`, `list_papers` deduplication and chunk count, `update_file_path`, `refresh_vault` (add / update / delete)
+- `tests/test_llm.py` — integration tests (marked `@pytest.mark.integration`): Anthropic client initialisation, `models.list()` API call ($0 tokens), Ollama server reachability
+- `docs/TESTING.md` — test infrastructure overview, how to run, what is and isn't covered
+- `[dependency-groups] dev = ["pytest>=8.0"]` in `pyproject.toml`; `[tool.pytest.ini_options]` with testpaths and markers
+- `tests/.chroma/` added to `.gitignore`
+
+### Changed
+- `CLAUDE.md` updated: all code changes must pass `uv run pytest -m "not integration"` before being considered done; tests must not be skipped or deleted to force a pass
+
+---
+
+## [previous] — doc_type simplification, PDF notes, update_file_path, auth cleanup
 
 ### Added
 - `storage_mode` metadata field (`"summary"` or `"full_text"`) stored on every indexed chunk

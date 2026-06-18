@@ -27,3 +27,10 @@ run-digest  = "digest.pipeline.run:main"
 convert-pdf = "digest.arxiv.convert:main"
 vault-chat  = "vault_chat.chat:main"
 kb          = "digest.kb.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires live services (Anthropic API key, running Ollama server)"]
