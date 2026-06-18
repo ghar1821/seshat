@@ -41,11 +41,34 @@
       padding: 10px 14px;
       border-radius: 10px;
       line-height: 1.55;
-      white-space: pre-wrap;
       word-break: break-word;
     }
-    .user .bubble      { background: #0057d9; color: #fff; }
+    .user .bubble      { background: #0057d9; color: #fff; white-space: pre-wrap; }
     .assistant .bubble { background: #fff; border: 1px solid #ddd; color: #111; }
+
+    /* Markdown element styles inside assistant bubbles */
+    .assistant .bubble p { margin-bottom: 0.55em; }
+    .assistant .bubble p:last-child { margin-bottom: 0; }
+    .assistant .bubble h1, .assistant .bubble h2, .assistant .bubble h3 {
+      font-weight: 600; margin: 0.8em 0 0.25em; line-height: 1.3;
+    }
+    .assistant .bubble h1 { font-size: 1.1em; }
+    .assistant .bubble h2 { font-size: 1.0em; }
+    .assistant .bubble h3 { font-size: 0.95em; }
+    .assistant .bubble ul, .assistant .bubble ol { padding-left: 1.4em; margin: 0.4em 0; }
+    .assistant .bubble li { margin-bottom: 0.15em; }
+    .assistant .bubble code {
+      background: #f0f0f0; border-radius: 3px;
+      padding: 0.1em 0.35em; font-size: 0.88em;
+      font-family: ui-monospace, monospace;
+    }
+    .assistant .bubble pre {
+      background: #f0f0f0; border-radius: 6px;
+      padding: 0.7em 1em; margin: 0.5em 0; overflow-x: auto;
+    }
+    .assistant .bubble pre code { background: none; padding: 0; font-size: 0.85em; }
+    .assistant .bubble hr { border: none; border-top: 1px solid #ddd; margin: 0.5em 0; }
+    .assistant .bubble a { color: #0057d9; }
 
     /* Native <details> for collapsible tool calls — no JS needed to toggle */
     details {
@@ -134,6 +157,101 @@
       .then(r => r.json())
       .then(history => { history.forEach(renderTurn); scrollToBottom(); });
 
+    // ── Markdown renderer ────────────────────────────────────────────────────
+
+    // Converts the LLM's markdown output to safe HTML.
+    // Handles: fenced code blocks, inline code, **bold**, *italic*, headers,
+    // bullet/numbered lists, horizontal rules, [links](url), and paragraphs.
+    // All user text is HTML-escaped before insertion to prevent XSS.
+    function renderMarkdown(text) {
+      function esc(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+
+      // Pull out fenced code blocks first so their content is not processed.
+      const codeBlocks = [];
+      text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
+        codeBlocks.push(`<pre><code>${esc(code.trimEnd())}</code></pre>`);
+        return `\x02CB${codeBlocks.length - 1}\x03`;
+      });
+
+      // Inline formatting for a single line of non-code text.
+      function inline(s) {
+        const spans = [];
+        // Extract inline code so its content is not bold/italic-processed.
+        s = s.replace(/`([^`\n]+)`/g, (_, c) => {
+          spans.push(`<code>${esc(c)}</code>`);
+          return `\x02IC${spans.length - 1}\x03`;
+        });
+        s = esc(s);  // escape remaining text (\x02/\x03 pass through unharmed)
+        s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+        // Links — only allow https?:// to block javascript: URIs.
+        // After esc(), & in URLs becomes &amp;, which is correct for href values.
+        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]*)\)/g,
+          (_, label, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+        s = s.replace(/\x02IC(\d+)\x03/g, (_, i) => spans[+i]);
+        return s;
+      }
+
+      // Walk lines and build block-level HTML.
+      const lines = text.split('\n');
+      const out = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+
+        // Fenced code block placeholder
+        const cbm = line.match(/^\x02CB(\d+)\x03$/);
+        if (cbm) { out.push(codeBlocks[+cbm[1]]); i++; continue; }
+
+        // Heading
+        const hm = line.match(/^(#{1,6})\s+(.*)/);
+        if (hm) {
+          out.push(`<h${Math.min(hm[1].length, 3)}>${inline(hm[2])}</h${Math.min(hm[1].length, 3)}>`);
+          i++; continue;
+        }
+
+        // Horizontal rule
+        if (/^-{3,}$/.test(line.trim())) { out.push('<hr>'); i++; continue; }
+
+        // Unordered list
+        if (/^[*\-]\s+\S/.test(line)) {
+          const items = [];
+          while (i < lines.length && /^[*\-]\s+/.test(lines[i]))
+            items.push(`<li>${inline(lines[i++].replace(/^[*\-]\s+/, ''))}</li>`);
+          out.push(`<ul>${items.join('')}</ul>`);
+          continue;
+        }
+
+        // Ordered list
+        if (/^\d+\.\s+\S/.test(line)) {
+          const items = [];
+          while (i < lines.length && /^\d+\.\s+/.test(lines[i]))
+            items.push(`<li>${inline(lines[i++].replace(/^\d+\.\s+/, ''))}</li>`);
+          out.push(`<ol>${items.join('')}</ol>`);
+          continue;
+        }
+
+        // Blank line
+        if (line.trim() === '') { i++; continue; }
+
+        // Paragraph: run of non-structural, non-blank lines
+        const para = [];
+        while (i < lines.length) {
+          const l = lines[i];
+          if (l.trim() === '') break;
+          if (/^#{1,6}\s/.test(l) || /^[*\-]\s+\S/.test(l) || /^\d+\.\s+\S/.test(l)) break;
+          if (/^-{3,}$/.test(l.trim()) || /^\x02CB\d+\x03$/.test(l)) break;
+          para.push(inline(l));
+          i++;
+        }
+        if (para.length) out.push(`<p>${para.join('<br>')}</p>`);
+      }
+
+      return out.join('');
+    }
+
     // ── Rendering ────────────────────────────────────────────────────────────
 
     // Render a completed turn (user or assistant) into the message list.
@@ -157,7 +275,11 @@
 
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
-      bubble.textContent = turn.content;
+      if (turn.role === 'assistant') {
+        bubble.innerHTML = renderMarkdown(turn.content);
+      } else {
+        bubble.textContent = turn.content;
+      }
       div.appendChild(bubble);
 
       msgContainer.appendChild(div);
@@ -244,7 +366,7 @@
             }
             const bubble = document.createElement('div');
             bubble.className = 'bubble';
-            bubble.textContent = event.content;
+            bubble.innerHTML = renderMarkdown(event.content);
             assistantDiv.appendChild(bubble);
             scrollToBottom();
           }
